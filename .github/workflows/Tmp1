@@ -1,0 +1,68 @@
+from xbbg import blp
+import pandas as pd
+import datetime
+
+# Define the main ticker for the US Treasury Actives Curve
+main_ticker = 'I25 Index'
+
+# Define the date range
+start_date = '2020-01-01'
+end_date = '2023-07-01'
+
+# Generate date range
+date_range = pd.date_range(start=start_date, end=end_date, freq='B')  # Business days
+
+all_member_data = []
+all_curve_data = []
+
+# Loop through each date and fetch the tickers and curve yield for that date
+for single_date in date_range:
+    date_str = single_date.strftime('%Y-%m-%d')
+    
+    # Fetch the members of the curve for the specific date
+    tickers_data = blp.ref_hist(
+        ticker=main_ticker,
+        flds=['CURVE_MEMBERS'],
+        dates=[date_str]
+    )
+    
+    # Extract tickers from the data
+    if not tickers_data.empty:
+        tickers = tickers_data.iloc[0]['CURVE_MEMBERS'].split(',')
+
+        # Fetch historical data for the tickers on that specific date
+        member_data = blp.bdh(
+            tickers=tickers,
+            flds=['PX_LAST'],
+            start_date=date_str,
+            end_date=date_str
+        )
+        
+        # Add the date information to the member data
+        member_data['Date'] = date_str
+        all_member_data.append(member_data)
+    
+    # Fetch historical data for the curve yield on that specific date
+    curve_data = blp.bdh(
+        tickers=main_ticker,
+        flds=['PX_LAST'],
+        start_date=date_str,
+        end_date=date_str
+    )
+
+    # Add the date information to the curve data
+    if not curve_data.empty:
+        curve_data['Date'] = date_str
+        all_curve_data.append(curve_data)
+
+# Combine all the member data into a single DataFrame
+combined_member_data = pd.concat(all_member_data)
+
+# Combine all the curve data into a single DataFrame
+combined_curve_data = pd.concat(all_curve_data)
+
+# Save the data to CSV files
+combined_member_data.to_csv('us_tsy_actives_curve_members_historical.csv', index=False)
+combined_curve_data.to_csv('us_tsy_actives_curve_yields_historical.csv', index=False)
+
+print("Data fetching and saving complete.")
