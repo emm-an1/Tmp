@@ -1,43 +1,46 @@
-import pandas as pd
+import matplotlib.pyplot as plt
 
-def detect_header_footer(file_path):
-    """
-    Detects the header row and the number of footer rows in an Excel file.
+# Define the two-level dictionary
+color_dict = {
+    'red': {
+        'light': '#FFC0CB',
+        'dark': '#8B0000'
+    },
+    'blue': {
+        'light': '#ADD8E6',
+        'dark': '#00008B'
+    },
+    'green': {
+        'light': '#90EE90',
+        'dark': '#006400'
+    }
+}
 
-    Args:
-    file_path (str): The path to the Excel file.
+# Create a plot to display the colors
+def plot_color_palette(color_dict):
+    fig, ax = plt.subplots(figsize=(8, 4))
 
-    Returns:
-    tuple: (header_row, footer_rows)
-    """
-    df = pd.read_excel(file_path, header=None)
-    
-    header_row = next((i for i, row in df.iterrows() if row.notna().sum() > 0), 0)
-    
-    footer_rows = next((i for i, row in enumerate(df[::-1].iterrows()) if row[1].notna().sum() > 0), 0)
-    
-    return header_row, footer_rows
+    # Number of colors
+    num_colors = sum(len(shades) for shades in color_dict.values())
 
-def clean_excel_file(file_path):
-    """
-    Cleans an Excel file by removing initial text rows and footnote rows.
+    # Set the plot limits
+    ax.set_xlim(0, num_colors)
+    ax.set_ylim(0, 1)
 
-    Args:
-    file_path (str): The path to the Excel file.
+    # Hide the axes
+    ax.axis('off')
 
-    Returns:
-    pd.DataFrame: The cleaned DataFrame.
-    """
-    header_row, footer_rows = detect_header_footer(file_path)
-    
-    df = pd.read_excel(file_path, header=header_row)
-    
-    if footer_rows > 0:
-        df = df[:-footer_rows]
-    
-    return df
+    # Plot each color
+    current_x = 0
+    for color, shades in color_dict.items():
+        for shade, hex_value in shades.items():
+            ax.add_patch(plt.Rectangle((current_x, 0), 1, 1, color=hex_value))
+            ax.text(current_x + 0.5, 0.5, f'{color} ({shade})', ha='center', va='center', fontsize=10, color='white' if shade == 'dark' else 'black')
+            current_x += 1
 
-# Example usage
-# file_path = 'path_to_your_file.xlsx'
-# cleaned_df = clean_excel_file(file_path)
-# print(cleaned_df)
+    plt.show()
+
+# Call the function to plot the color palette
+plot_color_palette(color_dict)
+
+
