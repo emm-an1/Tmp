@@ -1,4 +1,114 @@
-import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+from pptx import Presentation
+from pptx.util import Inches
+from pptx.enum.text import PP_ALIGN
+from pptx.dml.color import RGBColor
+
+# Create a PowerPoint presentation
+prs = Presentation()
+
+# Title Slide
+slide_title = prs.slides.add_slide(prs.slide_layouts[0])
+title = slide_title.shapes.title
+subtitle = slide_title.placeholders[1]
+title.text = "Derivation of Return of the Ratio of Two Assets"
+subtitle.text = "Mathematical Derivation and Explanation"
+
+# Slide 1: Definitions
+slide_1 = prs.slides.add_slide(prs.slide_layouts[1])
+title_1 = slide_1.shapes.title
+content_1 = slide_1.placeholders[1]
+title_1.text = "Definitions"
+definitions = (
+    "Prices:\n"
+    "P_A(t), P_A(t-1) are the prices of asset A at times t and t-1\n"
+    "P_B(t), P_B(t-1) are the prices of asset B at times t and t-1\n\n"
+    "Ratio:\n"
+    "ratio(t) = P_A(t) / P_B(t)\n"
+    "ratio(t-1) = P_A(t-1) / P_B(t-1)\n\n"
+    "Returns:\n"
+    "R_A(t) = (P_A(t) - P_A(t-1)) / P_A(t-1)\n"
+    "R_B(t) = (P_B(t) - P_B(t-1)) / P_B(t-1)"
+)
+content_1.text = definitions
+
+# Slide 2: Return of the Ratio
+slide_2 = prs.slides.add_slide(prs.slide_layouts[1])
+title_2 = slide_2.shapes.title
+content_2 = slide_2.placeholders[1]
+title_2.text = "Return of the Ratio"
+return_of_ratio = (
+    "The return of the ratio is defined as:\n"
+    "R_ratio(t) = (ratio(t) - ratio(t-1)) / ratio(t-1)\n\n"
+    "First, let’s express ratio(t) and ratio(t-1) in terms of prices:\n"
+    "ratio(t) = P_A(t) / P_B(t)\n"
+    "ratio(t-1) = P_A(t-1) / P_B(t-1)\n\n"
+    "The return of the ratio R_ratio(t) is:\n"
+    "R_ratio(t) = (P_A(t) / P_B(t) - P_A(t-1) / P_B(t-1)) / (P_A(t-1) / P_B(t-1))"
+)
+content_2.text = return_of_ratio
+
+# Slide 3: Simplify the Expression
+slide_3 = prs.slides.add_slide(prs.slide_layouts[1])
+title_3 = slide_3.shapes.title
+content_3 = slide_3.placeholders[1]
+title_3.text = "Simplify the Expression"
+simplify_expression = (
+    "Simplify the expression:\n"
+    "R_ratio(t) = [(P_A(t) P_B(t-1) - P_A(t-1) P_B(t)) / (P_B(t) P_B(t-1))] / (P_A(t-1) / P_B(t-1))\n"
+    "R_ratio(t) = (P_A(t) P_B(t-1) - P_A(t-1) P_B(t)) / (P_A(t-1) P_B(t))\n\n"
+    "Express P_A(t) and P_B(t) in terms of returns:\n"
+    "P_A(t) = P_A(t-1) (1 + R_A(t))\n"
+    "P_B(t) = P_B(t-1) (1 + R_B(t))"
+)
+content_3.text = simplify_expression
+
+# Slide 4: Substitute into the Formula
+slide_4 = prs.slides.add_slide(prs.slide_layouts[1])
+title_4 = slide_4.shapes.title
+content_4 = slide_4.placeholders[1]
+title_4.text = "Substitute into the Formula"
+substitute_formula = (
+    "Substitute these into the return of the ratio formula:\n"
+    "R_ratio(t) = [(P_A(t-1) (1 + R_A(t)) P_B(t-1) - P_A(t-1) (P_B(t-1) (1 + R_B(t))))] / [P_A(t-1) (P_B(t-1) (1 + R_B(t)))]\n\n"
+    "R_ratio(t) = [P_A(t-1) P_B(t-1) (1 + R_A(t)) - P_A(t-1) P_B(t-1) (1 + R_B(t))] / [P_A(t-1) P_B(t-1) (1 + R_B(t))]\n\n"
+    "R_ratio(t) = [P_A(t-1) P_B(t-1) (R_A(t) - R_B(t))] / [P_A(t-1) P_B(t-1) (1 + R_B(t))]"
+)
+content_4.text = substitute_formula
+
+# Slide 5: Final Simplification
+slide_5 = prs.slides.add_slide(prs.slide_layouts[1])
+title_5 = slide_5.shapes.title
+content_5 = slide_5.placeholders[1]
+title_5.text = "Final Simplification"
+final_simplification = (
+    "Simplify the equation:\n"
+    "R_ratio(t) = (R_A(t) - R_B(t)) / (1 + R_B(t))\n\n"
+    "Summary:\n"
+    "The return of the ratio of the two assets R_ratio(t) can be expressed as:\n"
+    "R_ratio(t) = (R_A(t) - R_B(t)) / (1 + R_B(t))\n\n"
+    "This formula shows that the return of the ratio depends on the difference between the individual returns R_A(t) and R_B(t), adjusted by the return of the second asset R_B(t)."
+)
+content_5.text = final_simplification
+
+# Save the presentation
+prs.save("/mnt/data/Return_of_Ratio_Derivation.pptx")
+
+# Let the user know the file has been created
+pptx_path = "/mnt/data/Return_of_Ratio_Derivation.pptx"
+pptx_path
+
+
+
+
+
+
+
+
+
+
+mport pandas as pd
 
 def find_first_common_date(dates1, values1, dates2, values2):
     # Create DataFrames
