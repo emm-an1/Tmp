@@ -1,42 +1,111 @@
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-from pptx import Presentation
-from pptx.util import Inches
-from pptx.enum.text import PP_ALIGN
-from pptx.dml.color import RGBColor
+\documentclass{beamer}
+\usepackage{amsmath}
 
-# Create a PowerPoint presentation
-prs = Presentation()
+\title{Derivation of Return of the Ratio of Two Assets}
+\subtitle{Mathematical Derivation and Explanation}
+\author{}
+\date{}
 
-# Title Slide
-slide_title = prs.slides.add_slide(prs.slide_layouts[0])
-title = slide_title.shapes.title
-subtitle = slide_title.placeholders[1]
-title.text = "Derivation of Return of the Ratio of Two Assets"
-subtitle.text = "Mathematical Derivation and Explanation"
+\begin{document}
 
-# Slide 1: Definitions
-slide_1 = prs.slides.add_slide(prs.slide_layouts[1])
-title_1 = slide_1.shapes.title
-content_1 = slide_1.placeholders[1]
-title_1.text = "Definitions"
-definitions = (
-    "Prices:\n"
-    "P_A(t), P_A(t-1) are the prices of asset A at times t and t-1\n"
-    "P_B(t), P_B(t-1) are the prices of asset B at times t and t-1\n\n"
-    "Ratio:\n"
-    "ratio(t) = P_A(t) / P_B(t)\n"
-    "ratio(t-1) = P_A(t-1) / P_B(t-1)\n\n"
-    "Returns:\n"
-    "R_A(t) = (P_A(t) - P_A(t-1)) / P_A(t-1)\n"
-    "R_B(t) = (P_B(t) - P_B(t-1)) / P_B(t-1)"
-)
-content_1.text = definitions
+\frame{\titlepage}
 
-# Slide 2: Return of the Ratio
-slide_2 = prs.slides.add_slide(prs.slide_layouts[1])
-title_2 = slide_2.shapes.title
-content_2 = slide_2.placeholders[1]
+\begin{frame}
+\frametitle{Definitions}
+Prices:
+\begin{align*}
+P_A(t), P_A(t-1), P_B(t), P_B(t-1)
+\end{align*}
+
+Ratio:
+\begin{align*}
+\text{ratio}(t) &= \frac{P_A(t)}{P_B(t)}, \quad \text{ratio}(t-1) = \frac{P_A(t-1)}{P_B(t-1)}
+\end{align*}
+
+Returns:
+\begin{align*}
+R_A(t) &= \frac{P_A(t) - P_A(t-1)}{P_A(t-1)}, \quad R_B(t) = \frac{P_B(t) - P_B(t-1)}{P_B(t-1)}
+\end{align*}
+\end{frame}
+
+\begin{frame}
+\frametitle{Return of the Ratio}
+The return of the ratio is defined as:
+\begin{align*}
+R_{\text{ratio}}(t) &= \frac{\text{ratio}(t) - \text{ratio}(t-1)}{\text{ratio}(t-1)}
+\end{align*}
+
+First, let’s express \text{ratio}(t) and \text{ratio}(t-1) in terms of prices:
+\begin{align*}
+\text{ratio}(t) &= \frac{P_A(t)}{P_B(t)} \\
+\text{ratio}(t-1) &= \frac{P_A(t-1)}{P_B(t-1)}
+\end{align*}
+
+The return of the ratio \(R_{\text{ratio}}(t)\) is:
+\begin{align*}
+R_{\text{ratio}}(t) &= \frac{\frac{P_A(t)}{P_B(t)} - \frac{P_A(t-1)}{P_B(t-1)}}{\frac{P_A(t-1)}{P_B(t-1)}}
+\end{align*}
+\end{frame}
+
+\begin{frame}
+\frametitle{Simplify the Expression}
+Simplify the expression:
+\begin{align*}
+R_{\text{ratio}}(t) &= \frac{\frac{P_A(t) P_B(t-1) - P_A(t-1) P_B(t)}{P_B(t) P_B(t-1)}}{\frac{P_A(t-1)}{P_B(t-1)}} \\
+R_{\text{ratio}}(t) &= \frac{P_A(t) P_B(t-1) - P_A(t-1) P_B(t)}{P_A(t-1) P_B(t)}
+\end{align*}
+
+Express \(P_A(t)\) and \(P_B(t)\) in terms of returns:
+\begin{align*}
+P_A(t) &= P_A(t-1) (1 + R_A(t)) \\
+P_B(t) &= P_B(t-1) (1 + R_B(t))
+\end{align*}
+\end{frame}
+
+\begin{frame}
+\frametitle{Substitute into the Formula}
+Substitute these into the return of the ratio formula:
+\begin{align*}
+R_{\text{ratio}}(t) &= \frac{(P_A(t-1) (1 + R_A(t)) P_B(t-1) - P_A(t-1) (P_B(t-1) (1 + R_B(t))))}{P_A(t-1) P_B(t-1) (1 + R_B(t))} \\
+R_{\text{ratio}}(t) &= \frac{P_A(t-1) P_B(t-1) (1 + R_A(t)) - P_A(t-1) P_B(t-1) (1 + R_B(t))}{P_A(t-1) P_B(t-1) (1 + R_B(t))} \\
+R_{\text{ratio}}(t) &= \frac{P_A(t-1) P_B(t-1) (R_A(t) - R_B(t))}{P_A(t-1) P_B(t-1) (1 + R_B(t))}
+\end{align*}
+\end{frame}
+
+\begin{frame}
+\frametitle{Final Simplification}
+Simplify the equation:
+\begin{align*}
+R_{\text{ratio}}(t) &= \frac{R_A(t) - R_B(t)}{1 + R_B(t)}
+\end{align*}
+
+Summary:
+The return of the ratio of the two assets \(R_{\text{ratio}}(t)\) can be expressed as:
+\begin{align*}
+R_{\text{ratio}}(t) &= \frac{R_A(t) - R_B(t)}{1 + R_B(t)}
+\end{align*}
+
+This formula shows that the return of the ratio depends on the difference between the individual returns \(R_A(t)\) and \(R_B(t)\), adjusted by the return of the second asset \(R_B(t)\).
+\end{frame}
+
+\end{document}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 title_2.text = "Return of the Ratio"
 return_of_ratio = (
     "The return of the ratio is defined as:\n"
