@@ -1,46 +1,60 @@
-import matplotlib.pyplot as plt
-
-# Define the two-level dictionary
-color_dict = {
-    'red': {
-        'light': '#FFC0CB',
-        'dark': '#8B0000'
-    },
-    'blue': {
-        'light': '#ADD8E6',
-        'dark': '#00008B'
-    },
-    'green': {
-        'light': '#90EE90',
-        'dark': '#006400'
-    }
-}
-
-# Create a plot to display the colors
-def plot_color_palette(color_dict):
-    fig, ax = plt.subplots(figsize=(8, 4))
-
-    # Number of colors
-    num_colors = sum(len(shades) for shades in color_dict.values())
-
-    # Set the plot limits
-    ax.set_xlim(0, num_colors)
-    ax.set_ylim(0, 1)
-
-    # Hide the axes
-    ax.axis('off')
-
-    # Plot each color
-    current_x = 0
-    for color, shades in color_dict.items():
-        for shade, hex_value in shades.items():
-            ax.add_patch(plt.Rectangle((current_x, 0), 1, 1, color=hex_value))
-            ax.text(current_x + 0.5, 0.5, f'{color} ({shade})', ha='center', va='center', fontsize=10, color='white' if shade == 'dark' else 'black')
-            current_x += 1
-
-    plt.show()
-
-# Call the function to plot the color palette
-plot_color_palette(color_dict)
 
 
+ import pandas as pd
+
+def rebase_series(dates1, prices1, dates2, prices2, rebase_date=None):
+    # Create DataFrames
+    df1 = pd.DataFrame({'date': dates1, 'price': prices1})
+    df2 = pd.DataFrame({'date': dates2, 'price': prices2})
+
+    # Convert date columns to datetime
+    df1['date'] = pd.to_datetime(df1['date'])
+    df2['date'] = pd.to_datetime(df2['date'])
+
+    # Set date as index
+    df1.set_index('date', inplace=True)
+    df2.set_index('date', inplace=True)
+
+    # Calculate daily returns
+    df1['return'] = df1['price'].pct_change()
+    df2['return'] = df2['price'].pct_change()
+
+    # Align the dataframes to have the same date range
+    df1_aligned, df2_aligned = df1.align(df2, join='inner')
+
+    # Determine the rebase date if not provided
+    if rebase_date is None:
+        rebase_date = max(df1_aligned.index.min(), df2_aligned.index.min())
+
+    # Filter data starting from the rebase date
+    df1_aligned = df1_aligned[df1_aligned.index >= rebase_date]
+    df2_aligned = df2_aligned[df2_aligned.index >= rebase_date]
+
+    # Initialize the rebased prices starting at 100
+    df1_aligned['rebased_price'] = 100
+    df2_aligned['rebased_price'] = 100
+
+    # Apply the returns to get rebased prices
+    for i in range(1, len(df1_aligned)):
+        df1_aligned.iloc[i, df1_aligned.columns.get_loc('rebased_price')] = df1_aligned.iloc[i-1, df1_aligned.columns.get_loc('rebased_price')] * (1 + df1_aligned.iloc[i, df1_aligned.columns.get_loc('return')])
+
+    for i in range(1, len(df2_aligned)):
+        df2_aligned.iloc[i, df2_aligned.columns.get_loc('rebased_price')] = df2_aligned.iloc[i-1, df2_aligned.columns.get_loc('rebased_price')] * (1 + df2_aligned.iloc[i, df2_aligned.columns.get_loc('return')])
+
+    # Merge the rebased prices into a single DataFrame for comparison
+    rebased_df = pd.DataFrame({'date': df1_aligned.index, 'rebased_price_1': df1_aligned['rebased_price'], 'rebased_price_2': df2_aligned['rebased_price']})
+
+    # Reset index for final display
+    rebased_df.set_index('date', inplace=True)
+
+    return rebased_df
+
+# Example usage:
+dates1 = ['2023-01-01', '2023-01-02', '2023-01-03', '2023-01-04']
+prices1 = [100, 105, 103, 108]
+dates2 = ['2023-01-02', '2023-01-03', '2023-01-04', '2023-01-05']
+prices2 = [200, 195, 198, 202]
+
+rebased_df = rebase_series(dates1, prices1, dates2, prices2, rebase_date=None)
+print(rebased_df)
+ 
