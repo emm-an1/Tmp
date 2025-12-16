@@ -1,2 +1,100 @@
 
-123
+from typing import List, Union
+import pandas as pd
+
+from .base import Node
+
+
+class ScalingNode(Node):
+    """
+    Scales predecessor's market values by a multiplier.
+    
+    mv() = predecessor.mv() * multiplier
+    
+    Note: Always multiplies. To divide by X, pass 1/X as multiplier.
+    """
+    
+    def __init__(self, name: str, predecessors: List[str], multiplier: Union[pd.Series, pd.DataFrame]):
+        """
+        Args:
+            name: Node name
+            predecessors: List with single predecessor name
+            multiplier: Series (applied to all instruments) or DataFrame (per instrument)
+        """
+        # Call parent constructor
+        super().__init__(name=name, predecessors=predecessors)
+        
+        # Validate single predecessor
+        if len(self.predecessors) != 1:
+            raise ValueError(f"ScalingNode expects 1 predecessor, got {len(self.predecessors)}")
+        
+        self._multiplier = multiplier
+    
+    @property
+    def predecessor(self) -> Node:
+        """Convenience accessor for single predecessor."""
+        return self.predecessors[0]
+    
+    def mv(self) -> pd.DataFrame:
+        """
+        Returns scaled market values.
+        
+        mv = predecessor.mv() * multiplier
+        
+        Index: date
+        Columns: one column per instrument.
+        """
+        pred_mv = self.predecessor.mv()
+        
+        if isinstance(self._multiplier, pd.Series):
+            # Apply same multiplier to all instruments
+            result = pred_mv.multiply(self._multiplier, axis=0)
+        else:
+            # DataFrame: multiply matching columns
+            result = pred_mv * self._multiplier
+        
+        return result
+    
+    def mv_detail(self) -> pd.DataFrame:
+        """
+        Returns disaggregated market values.
+        
+        For ScalingNode, same as mv() but with predecessor name prefix.
+        """
+        mv = self.mv()
+        mv.columns = [f"{self.predecessor.name}.{col}" for col in mv.columns]
+        return mv
+    
+    def pnl(self) -> pd.DataFrame:
+        """
+        Returns aggregated pnl for this node.
+        
+        pnl(t) = mv(t-1) * r(t-1, t)
+        
+        Index: date
+        Columns: single column named after this node.
+        """
+        mv = self.mv()
+        returns = self.instrument_returns()
+        
+        # Only multiply columns that exist in both
+        instruments = [c for c in mv.columns if c in returns.columns]
+        
+        # Compute pnl per instrument and sum to get total
+        # Shift mv: position at t-1 earns return realized at t
+        total_pnl = pd.Series(0.0, index=mv.index)
+        for instrument in instruments:
+            total_pnl += mv[instrument].shift(1) * returns[instrument]
+        
+        # Return as DataFrame with node name as column
+        result = pd.DataFrame({self.name: total_pnl})
+        
+        return result
+    
+    def instrument_returns(self) -> pd.DataFrame:
+        """
+        Returns returns of all instruments involved in this node.
+        
+        Passes through from predecessor.
+        """
+        return self.predecessor.instrument_returns()
