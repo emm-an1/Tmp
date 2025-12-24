@@ -1,22 +1,77 @@
-def __init__(self, name: str, predecessors: List[str], signal_name: str, data: pd.DataFrame):
+from typing import List
+import pandas as pd
+
+from .base import Node
+
+
+class PrecomputedUVTrendSignalNode(Node):
     """
-    Args:
-        name: Node name (typically f"{instrument_id}_{signal_name}")
-        predecessors: List with single predecessor name (the InstrumentNode)
-        signal_name: Signal identifier (e.g., "trendv1_EMA005")
-        data: Pre-filtered DataFrame for this instrument + signal
+    Leaf-like node that uses precomputed trend signal data.
+    
+    mv from '$_position' column, pnl from 'PnL_UnitVol' column.
+    
+    Note: This is a shortcut for precomputed signals.
+    UV = unit volatility (pnl is vol-normalized).
+    A proper TrendSignalNode would compute signals from InstrumentNode data.
     """
-    super().__init__(name=name, predecessors=predecessors)
     
-    if len(self.predecessors) != 1:
-        raise ValueError(f"PrecomputedUVTrendSignalNode expects 1 predecessor, got {len(self.predecessors)}")
+    def __init__(self, name: str, predecessors: List[str], signal_name: str, data: pd.DataFrame):
+        """
+        Args:
+            name: Node name (typically f"{instrument_id}_{signal_name}")
+            predecessors: List with single predecessor name (the InstrumentNode)
+            signal_name: Signal identifier (e.g., "trendv1_EMA005")
+            data: Pre-filtered DataFrame for this instrument + signal (index=date)
+        """
+        # Call parent constructor
+        super().__init__(name=name, predecessors=predecessors)
+        
+        # Validate single predecessor
+        if len(self.predecessors) != 1:
+            raise ValueError(f"PrecomputedUVTrendSignalNode expects 1 predecessor, got {len(self.predecessors)}")
+        
+        self._signal_name = signal_name
+        
+        # Extract mv (index is already date)
+        self._mv = data[["$_position"]].copy()
+        self._mv = self._mv.rename(columns={"$_position": self.predecessor.name})
+        
+        # Extract pnl (index is already date)
+        self._pnl = data[["PnL_UnitVol"]].copy()
+        self._pnl = self._pnl.rename(columns={"PnL_UnitVol": self.name})
     
-    self._signal_name = signal_name
+    @property
+    def predecessor(self) -> Node:
+        """Convenience accessor for single predecessor."""
+        return self.predecessors[0]
     
-    # Extract mv (index is already date)
-    self._mv = data[["$_position"]].copy()
-    self._mv = self._mv.rename(columns={"$_position": self.predecessor.name})
+    @property
+    def instrument_id(self) -> str:
+        """Get instrument_id from predecessor."""
+        return self.predecessor.name
     
-    # Extract pnl (index is already date)
-    self._pnl = data[["PnL_UnitVol"]].copy()
-    self._pnl = self._pnl.rename(columns={"PnL_UnitVol": self.name})
+    def mv(self) -> pd.DataFrame:
+        """
+        Returns precomputed market values.
+        
+        Index: date
+        Columns: instrument_id
+        """
+        return self._mv.copy()
+    
+    def pnl(self) -> pd.DataFrame:
+        """
+        Returns precomputed unit vol pnl.
+        
+        Index: date
+        Columns: node name
+        """
+        return self._pnl.copy()
+    
+    def instrument_returns(self) -> pd.DataFrame:
+        """
+        Returns returns of the underlying instrument.
+        
+        Delegates to predecessor (InstrumentNode).
+        """
+        return self.predecessor.instrument_returns()
