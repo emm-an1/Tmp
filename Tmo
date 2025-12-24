@@ -1,100 +1,22 @@
-from typing import List
-import pandas as pd
-
-from .base import Node
-
-
-class PrecomputedTrendSignalNode(Node):
+def __init__(self, name: str, predecessors: List[str], signal_name: str, data: pd.DataFrame):
     """
-    Leaf-like node that loads precomputed trend signal data.
-    
-    Loads mv from '$_position' column and pnl from 'PnL_UnitVol' column.
-    Filters data by instrument_id (from predecessor) and signal_name.
-    
-    Note: This is a shortcut for precomputed signals. 
-    A proper TrendSignalNode would compute signals from InstrumentNode data.
+    Args:
+        name: Node name (typically f"{instrument_id}_{signal_name}")
+        predecessors: List with single predecessor name (the InstrumentNode)
+        signal_name: Signal identifier (e.g., "trendv1_EMA005")
+        data: Pre-filtered DataFrame for this instrument + signal
     """
+    super().__init__(name=name, predecessors=predecessors)
     
-    _data_service = None  # class variable, shared by all instances
+    if len(self.predecessors) != 1:
+        raise ValueError(f"PrecomputedUVTrendSignalNode expects 1 predecessor, got {len(self.predecessors)}")
     
-    @classmethod
-    def set_data_service(cls, data_service):
-        """Set the shared DataService. Call once at startup."""
-        cls._data_service = data_service
+    self._signal_name = signal_name
     
-    def __init__(self, name: str, predecessors: List[str], signal_name: str):
-        """
-        Args:
-            name: Node name (typically f"{instrument_id}_{signal_name}")
-            predecessors: List with single predecessor name (the InstrumentNode)
-            signal_name: Signal identifier (e.g., "trendv1_EMA005")
-        """
-        # Call parent constructor
-        super().__init__(name=name, predecessors=predecessors)
-        
-        # Validate single predecessor
-        if len(self.predecessors) != 1:
-            raise ValueError(f"PrecomputedTrendSignalNode expects 1 predecessor, got {len(self.predecessors)}")
-        
-        self._signal_name = signal_name
-        
-        # Load data from DataService
-        if self._data_service is None:
-            raise RuntimeError(
-                "DataService not set. Call PrecomputedTrendSignalNode.set_data_service(ds) first."
-            )
-        
-        self._load_data()
+    # Extract mv (index is already date)
+    self._mv = data[["$_position"]].copy()
+    self._mv = self._mv.rename(columns={"$_position": self.predecessor.name})
     
-    @property
-    def predecessor(self) -> Node:
-        """Convenience accessor for single predecessor."""
-        return self.predecessors[0]
-    
-    @property
-    def instrument_id(self) -> str:
-        """Get instrument_id from predecessor."""
-        return self.predecessor.name
-    
-    def _load_data(self):
-        """Load mv and pnl from DataService."""
-        df = self._data_service._returns_df  # access full dataset
-        
-        # Filter by instrument_id and signal_name
-        mask = (df["id"] == self.instrument_id) & (df["signal_name"] == self._signal_name)
-        subset = df[mask].copy()
-        
-        # Extract mv and pnl, set date as index
-        self._mv = subset[["date", "$_position"]].copy()
-        self._mv = self._mv.rename(columns={"$_position": self.instrument_id})
-        self._mv = self._mv.set_index("date")
-        
-        self._pnl = subset[["date", "PnL_UnitVol"]].copy()
-        self._pnl = self._pnl.rename(columns={"PnL_UnitVol": self.name})
-        self._pnl = self._pnl.set_index("date")
-    
-    def mv(self) -> pd.DataFrame:
-        """
-        Returns precomputed market values.
-        
-        Index: date
-        Columns: instrument_id
-        """
-        return self._mv.copy()
-    
-    def pnl(self) -> pd.DataFrame:
-        """
-        Returns precomputed pnl.
-        
-        Index: date
-        Columns: node name
-        """
-        return self._pnl.copy()
-    
-    def instrument_returns(self) -> pd.DataFrame:
-        """
-        Returns returns of the underlying instrument.
-        
-        Delegates to predecessor (InstrumentNode).
-        """
-        return self.predecessor.instrument_returns()
+    # Extract pnl (index is already date)
+    self._pnl = data[["PnL_UnitVol"]].copy()
+    self._pnl = self._pnl.rename(columns={"PnL_UnitVol": self.name})
