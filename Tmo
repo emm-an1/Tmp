@@ -1,90 +1,97 @@
-from typing import Union
-import pandas as pd
+from portfolio_tree.nodes.CorrAdjustedUVScalingNode import CorrAdjustedUVScalingNode
 
-from .base import Node
+# Step 1: WeightedSumNode combining NO1 and TP1 fast nodes
+WeightedSumNode(
+    name="JP_equity_fast_ws",
+    predecessors=["NO1 Index_fast", "TP1 Index_fast"],
+    weights={"NO1 Index_fast": 2, "TP1 Index_fast": 1}
+)
+
+# Step 2: CorrAdjustedUVScalingNode to get unit vol
+jp_equity_fast = CorrAdjustedUVScalingNode(
+    name="JP_equity_fast",
+    predecessors=["JP_equity_fast_ws"],
+    years=5
+)
+
+# Check
+print(jp_equity_fast)
+print(f"Instruments: {jp_equity_fast.instruments()}")
+print(f"Multiplier (first non-NaN values):")
+print(jp_equity_fast.multiplier.dropna().head())
+#####
 
 
-class ScalingNode(Node):
-    """
-    Scales predecessor's market values by a multiplier.
-    
-    mv() = predecessor.mv() * multiplier
-    
-    Note: Always multiplies. To divide by X, pass 1/X as multiplier.
-    """
-    
-    def __init__(self, name: str, predecessors: list[str], multiplier: Union[pd.Series, pd.DataFrame] = None):
-        """
-        Args:
-            name: Node name
-            predecessors: List with single predecessor name
-            multiplier: Series (applied to all instruments) or DataFrame (per instrument).
-                        Can be None if subclass computes it.
-        """
-        super().__init__(name=name, predecessors=predecessors)
-        
-        if len(self.predecessors) != 1:
-            raise ValueError(f"ScalingNode expects 1 predecessor, got {len(self.predecessors)}")
-        
-        self._multiplier = multiplier
-    
-    @property
-    def predecessor(self) -> Node:
-        """Convenience accessor for single predecessor."""
-        return self.predecessors[0]
-    
-    @property
-    def multiplier(self) -> Union[pd.Series, pd.DataFrame]:
-        """Multiplier. Override in subclass for computed multipliers."""
-        if self._multiplier is None:
-            raise ValueError("Multiplier not set. Override multiplier property in subclass.")
-        return self._multiplier
-    
-    def mv(self) -> pd.DataFrame:
-        """
-        Returns scaled market values.
-        
-        mv = predecessor.mv() * multiplier
-        
-        Index: date
-        Columns: one column per instrument.
-        """
-        pred_mv = self.predecessor.mv()
-        
-        if isinstance(self.multiplier, pd.Series):
-            result = pred_mv.multiply(self.multiplier, axis=0)
-        else:
-            result = pred_mv * self.multiplier
-        
-        return result
-    
-    def mv_detail(self) -> pd.DataFrame:
-        """
-        Returns disaggregated market values.
-        
-        For ScalingNode, same as mv() but with predecessor name prefix.
-        """
-        mv = self.mv()
-        mv.columns = [f"{self.predecessor.name}.{col}" for col in mv.columns]
-        return mv
-    
-    def pnl(self) -> pd.DataFrame:
-        """
-        Returns aggregated pnl for this node.
-        
-        pnl(t) = mv(t-1) * r(t-1, t)
-        
-        Index: date
-        Columns: single column named after this node.
-        """
-        mv = self.mv()
-        returns = self.instrument_returns()
-        
-        instruments = [c for c in mv.columns if c in returns.columns]
-        
-        total_pnl = pd.Series(0.0, index=mv.index)
-        for instrument in instruments:
-            total_pnl += mv[instrument].shift(1) * returns[instrument]
-        
-        result = pd.DataFrame({self.name: total_pnl})
-        return result
+# Check correlation scaling
+ws_node = NodeRegistry.get("JP_equity_fast_ws")
+
+# Get component pnls
+no1_pnl = NodeRegistry.get("NO1 Index_fast").pnl()["NO1 Index_fast"]
+tp1_pnl = NodeRegistry.get("TP1 Index_fast").pnl()["TP1 Index_fast"]
+
+# Weights
+w = np.array([2, 1])
+
+# Pick a date after warmup (5 years)
+test_idx = 5 * 252 + 10
+test_date = no1_pnl.index[test_idx]
+
+# Compute correlation manually
+window_no1 = no1_pnl.iloc[test_idx - 5*252:test_idx]
+window_tp1 = tp1_pnl.iloc[test_idx - 5*252:test_idx]
+corr = np.corrcoef(window_no1, window_tp1)
+
+# Compute sqrt(w' * Corr * w)
+wcw = w @ corr @ w
+divisor = np.sqrt(wcw)
+
+print(f"Test date: {test_date}")
+print(f"Correlation matrix:\n{corr}")
+print(f"sqrt(w' * Corr * w) = {divisor}")
+print(f"Multiplier = {1/divisor}")
+print(f"Node multiplier = {jp_equity_fast.multiplier.loc[test_date]}")
+###%%%
+
+
+import matplotlib.pyplot as plt
+
+# Create the node
+jp_equity_fast = NodeRegistry.get("JP_equity_fast")
+
+# Get correlation time series
+corr_series = jp_equity_fast.correlation_series()
+
+# Plot
+fig, ax = plt.subplots(figsize=(12, 5))
+corr_series.plot(ax=ax)
+ax.set_title("Rolling 5Y correlation: NO1 Index_fast vs TP1 Index_fast")
+ax.set_ylabel("Correlation")
+ax.axhline(y=1.0, color='gray', linestyle='--', alpha=0.5)
+ax.axhline(y=0.0, color='gray', linestyle='--', alpha=0.5)
+plt.show()
+
+# Also check specific date
+print(f"\nLatest correlation matrix:\n{jp_equity_fast.get_correlation()}")
+
+###
+
+import matplotlib.pyplot as plt
+
+# Create the node
+jp_equity_fast = NodeRegistry.get("JP_equity_fast")
+
+# Get correlation time series
+corr_series = jp_equity_fast.correlation_series()
+
+# Plot
+fig, ax = plt.subplots(figsize=(12, 5))
+corr_series.plot(ax=ax)
+ax.set_title("Rolling 5Y correlation: NO1 Index_fast vs TP1 Index_fast")
+ax.set_ylabel("Correlation")
+ax.axhline(y=1.0, color='gray', linestyle='--', alpha=0.5)
+ax.axhline(y=0.0, color='gray', linestyle='--', alpha=0.5)
+plt.show()
+
+# Also check specific date
+print(f"\nLatest correlation matrix:\n{jp_equity_fast.get_correlation()}")
+
