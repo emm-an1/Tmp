@@ -1,61 +1,25 @@
-# Pick one fast node to test
-test_node = NodeRegistry.get("AD1 Curncy_fast")
-print(f"Testing: {test_node.name}")
-print(f"Instruments: {test_node.instruments()}")
-
-# Check the chain
-print("\n--- Node chain ---")
-print(f"ScalingNode: {test_node.name}")
-print(f"  multiplier: {test_node._multiplier}")
-print(f"  predecessor: {test_node.predecessor.name}")
-
-ws_node = test_node.predecessor
-print(f"\nWeightedSumNode: {ws_node.name}")
-print(f"  weights: {ws_node._weights}")
-print(f"  predecessors: {[p.name for p in ws_node.predecessors]}")
-
-# Check mv calculation
-print("\n--- MV check ---")
-signal_5 = NodeRegistry.get("AD1 Curncy_trend_v3_EMA005")
-signal_10 = NodeRegistry.get("AD1 Curncy_trend_v3_EMA010")
-
-# WeightedSum mv should be: signal_5.mv() * 1 + signal_10.mv() * 1
-ws_mv_expected = signal_5.mv() + signal_10.mv()
-ws_mv_actual = ws_node.mv()
-print(f"WeightedSum mv matches: {ws_mv_expected.equals(ws_mv_actual)}")
-
-# ScalingNode mv should be: ws_node.mv() * 0.5
-scaled_mv_expected = ws_node.mv() * 0.5
-scaled_mv_actual = test_node.mv()
-print(f"Scaled mv matches: {scaled_mv_expected.equals(scaled_mv_actual)}")
-
-# Check pnl
-print("\n--- PnL check ---")
-print("Fast node pnl (first 5 rows):")
-print(test_node.pnl().head())
-
-print("\nComponent pnls (first 5 rows):")
-print("EMA005:", signal_5.pnl().head())
-print("EMA010:", signal_10.pnl().head())
-
-
-
-####
-
-import matplotlib.pyplot as plt
-
-# Plot cumulative pnl
-fig, ax = plt.subplots(figsize=(10, 6))
-
-signal_5 = NodeRegistry.get("AD1 Curncy_trend_v3_EMA005")
-signal_10 = NodeRegistry.get("AD1 Curncy_trend_v3_EMA010")
 fast_node = NodeRegistry.get("AD1 Curncy_fast")
 
-signal_5.pnl().cumsum().plot(ax=ax, label="EMA005")
-signal_10.pnl().cumsum().plot(ax=ax, label="EMA010")
-fast_node.pnl().cumsum().plot(ax=ax, label="Fast (combined)", linewidth=2)
+mv = fast_node.mv()
+returns = fast_node.instrument_returns()
 
-ax.legend()
-ax.set_title("AD1 Curncy: Fast trend components vs combined")
-plt.show()
+# Compute pnl manually
+instruments = fast_node.instruments()
+manual_pnl = sum(mv[inst].shift(1) * returns[inst] for inst in instruments)
 
+# Compare with node's pnl
+node_pnl = fast_node.pnl()[fast_node.name]
+
+# Check
+print("Manual pnl (first 5):")
+print(manual_pnl.head())
+
+print("\nNode pnl (first 5):")
+print(node_pnl.head())
+
+print("\nMatch (ignoring NaN):")
+print(manual_pnl.dropna().equals(node_pnl.dropna()))
+
+# Or check max difference
+diff = (manual_pnl - node_pnl).abs().max()
+print(f"\nMax difference: {diff}")
