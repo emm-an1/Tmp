@@ -1,140 +1,52 @@
-from abc import ABC, abstractmethod
-import pandas as pd
+from collections import defaultdict
 
-from ..NodeRegistry import NodeRegistry
+# Build lookup: {instrument_id: {hl: node_name}}
+nodes_by_instrument = defaultdict(dict)
 
+for node in signal_nodes:
+    instrument_id = node.instruments()[0]
+    hl_str = node.name.split("_EMA")[-1]
+    hl = int(hl_str)
+    nodes_by_instrument[instrument_id][hl] = node.name
 
-class Node(ABC):
-    """Abstract base class for all portfolio tree nodes."""
-    
-    def __init__(self, name: str, predecessors: list[str] = None):
-        self.name = name
-        
-        self.predecessors = []
-        if predecessors:
-            for pred_name in predecessors:
-                self.predecessors.append(NodeRegistry.get(pred_name))
-        
-        NodeRegistry.register(self)
-    
-    @abstractmethod
-    def mv(self) -> pd.DataFrame:
-        """Returns market values for this node. Index=date."""
-        pass
-    
-    @abstractmethod
-    def pnl(self) -> pd.DataFrame:
-        """Returns profit and loss for this node. Index=date."""
-        pass
-    
-    def instruments(self) -> list[str]:
-        """Returns list of instrument names involved in this node."""
-        all_instruments = []
-        for pred in self.predecessors:
-            for instr in pred.instruments():
-                if instr not in all_instruments:
-                    all_instruments.append(instr)
-        return all_instruments
-    
-    def instrument_returns(self) -> pd.DataFrame:
-        """Returns the returns of all instruments involved in this node."""
-        dfs = []
-        for pred in self.predecessors:
-            pred_returns = pred.instrument_returns()
-            dfs.append(pred_returns)
-        
-        if not dfs:
-            return pd.DataFrame()
-        
-        result = dfs[0]
-        for df in dfs[1:]:
-            new_cols = [c for c in df.columns if c not in result.columns]
-            if new_cols:
-                result = result.join(df[new_cols], how="outer")
-        
-        return result
-    
-    def dir(self):
-        """Print all callable public methods."""
-        methods = [
-            attr for attr in dir(self)
-            if callable(getattr(self, attr)) and not attr.startswith('_') and not attr.endswith('_')
-        ]
-        for method in methods:
-            print(method)
-    
-    def __repr__(self) -> str:
-        pred_names = [p.name for p in self.predecessors]
-        return f"{self.__class__.__name__}(name='{self.name}', predecessors={pred_names})"
+# Define speed groups
+speed_groups = {
+    "fast": [5, 10],
+    "medium": [20, 40],
+    "slow": [60, 120]
+}
 
+# Store created nodes
+trend_nodes = []
 
-
-########-----
-from typing import List
-import pandas as pd
-
-from .base import Node
-
-
-class PrecomputedUVTrendSignalNode(Node):
-    """
-    Leaf-like node that uses precomputed trend signal data.
-    
-    mv from '$_position' column, pnl from 'PnL_UnitVol' column.
-    
-    Note: This is a shortcut for precomputed signals.
-    UV = unit volatility (pnl is vol-normalized).
-    A proper TrendSignalNode would compute signals from InstrumentNode data.
-    """
-    
-    def __init__(self, name: str, predecessors: list[str], signal_name: str, data: pd.DataFrame):
-        """
-        Args:
-            name: Node name (typically f"{instrument_id}_{signal_name}")
-            predecessors: List with single predecessor name (the InstrumentNode)
-            signal_name: Signal identifier (e.g., "trendv1_EMA005")
-            data: Pre-filtered DataFrame for this instrument + signal (index=date)
-        """
-        # Call parent constructor
-        super().__init__(name=name, predecessors=predecessors)
+# Create trend nodes for each instrument
+for instrument_id, hl_nodes in nodes_by_instrument.items():
+    for speed, hls in speed_groups.items():
+        # Get predecessor names
+        pred_names = [hl_nodes[hl] for hl in hls]
         
-        # Validate single predecessor
-        if len(self.predecessors) != 1:
-            raise ValueError(f"PrecomputedUVTrendSignalNode expects 1 predecessor, got {len(self.predecessors)}")
+        # Weights all 1
+        weights = {name: 1.0 for name in pred_names}
         
-        self._signal_name = signal_name
+        # Number of signals for scaling
+        n_signals = len(hls)
         
-        # Extract mv (index is already date)
-        self._mv = data[["$_position"]].rename(columns={"$_position": self.instruments()[0]})
+        # Weighted sum node
+        ws_name = f"{instrument_id}_{speed}_ws"
+        WeightedSumNode(
+            name=ws_name,
+            predecessors=pred_names,
+            weights=weights
+        )
         
-        # Extract pnl (index is already date)
-        self._pnl = data[["PnL_UnitVol"]].rename(columns={"PnL_UnitVol": self.name})
-    
-    @property
-    def predecessor(self) -> Node:
-        """Convenience accessor for single predecessor."""
-        return self.predecessors[0]
-    
-    def instruments(self) -> list[str]:
-        """Returns the underlying instrument name."""
-        return [self.predecessor.name]
-    
-    def mv(self) -> pd.DataFrame:
-        """
-        Returns precomputed market values.
+        # Scale node (divide by n_signals)
+        scaled_name = f"{instrument_id}_{speed}"
+        scaled_node = ScalingNode(
+            name=scaled_name,
+            predecessors=[ws_name],
+            multiplier=1.0 / n_signals
+        )
         
-        Index: date
-        Columns: instrument_id
-        """
-        return self._mv.copy()
-    
-    def pnl(self) -> pd.DataFrame:
-        """
-        Returns precomputed unit vol pnl.
-        
-        Index: date
-        Columns: node name
-        """
-        return self._pnl.copy()
+        trend_nodes.append(scaled_node)
 
-
+print(f"Created {len(trend_nodes)} trend nodes")
