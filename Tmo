@@ -1,100 +1,90 @@
-import numpy as np
+from typing import Union
 import pandas as pd
 
-from .ScalingNode import ScalingNode
-from .WeightedSumNode import WeightedSumNode
+from .base import Node
 
 
-class CorrAdjustedUVScalingNode(ScalingNode):
+class ScalingNode(Node):
     """
-    Scales predecessor to unit volatility using correlation-adjusted risk.
+    Scales predecessor's market values by a multiplier.
     
-    multiplier = 1 / sqrt(w' * Corr * w)
+    mv() = predecessor.mv() * multiplier
     
-    Where:
-    - w = weights from predecessor WeightedSumNode
-    - Corr = rolling correlation matrix of predecessor's predecessor pnls
+    Note: Always multiplies. To divide by X, pass 1/X as multiplier.
     """
     
-    def __init__(self, name: str, predecessors: list[str], years: float = 5):
+    def __init__(self, name: str, predecessors: list[str], multiplier: Union[pd.Series, pd.DataFrame] = None):
         """
         Args:
             name: Node name
-            predecessors: List with single predecessor name (must be WeightedSumNode)
-            years: Rolling window in years (default 5)
+            predecessors: List with single predecessor name
+            multiplier: Series (applied to all instruments) or DataFrame (per instrument).
+                        Can be None if subclass computes it.
         """
-        # Call parent with multiplier=None (we compute it)
-        super().__init__(name=name, predecessors=predecessors, multiplier=None)
+        super().__init__(name=name, predecessors=predecessors)
         
-        if not isinstance(self.predecessor, WeightedSumNode):
-            raise ValueError("CorrAdjustedUVScalingNode predecessor must be WeightedSumNode")
+        if len(self.predecessors) != 1:
+            raise ValueError(f"ScalingNode expects 1 predecessor, got {len(self.predecessors)}")
         
-        self._years = years
-        self._window = int(years * 252)
-        self._computed_multiplier = None
-        self._rolling_corr = None
-    
-    def _compute_multiplier(self) -> pd.Series:
-        """Compute 1/sqrt(w' * Corr * w) as rolling time series."""
-        ws_node = self.predecessor
-        weights = ws_node._weights
-        
-        # Get pnls from WeightedSumNode's predecessors
-        pnl_df = pd.DataFrame({
-            pred.name: pred.pnl()[pred.name]
-            for pred in ws_node.predecessors
-        })
-        
-        # Get weights as array in same order as columns
-        w = np.array([weights[name] for name in pnl_df.columns])
-        
-        # Store rolling correlations
-        self._rolling_corr = {}
-        
-        divisor = pd.Series(index=pnl_df.index, dtype=float)
-        
-        for i in range(self._window, len(pnl_df)):
-            date = pnl_df.index[i]
-            window = pnl_df.iloc[i - self._window:i]
-            corr = window.corr()
-            self._rolling_corr[date] = corr
-            wcw = w @ corr.values @ w
-            divisor.iloc[i] = np.sqrt(wcw)
-        
-        multiplier = 1 / divisor
-        return multiplier
+        self._multiplier = multiplier
     
     @property
-    def multiplier(self) -> pd.Series:
-        """Lazy computation of multiplier. Overrides parent."""
-        if self._computed_multiplier is None:
-            self._computed_multiplier = self._compute_multiplier()
-        return self._computed_multiplier
+    def predecessor(self) -> Node:
+        """Convenience accessor for single predecessor."""
+        return self.predecessors[0]
     
-    def get_correlation(self, date=None) -> pd.DataFrame:
-        """Get correlation matrix at a specific date, or latest if None."""
-        # Ensure computed
-        _ = self.multiplier
-        
-        if date is None:
-            date = max(self._rolling_corr.keys())
-        return self._rolling_corr[date]
+    @property
+    def multiplier(self) -> Union[pd.Series, pd.DataFrame]:
+        """Multiplier. Override in subclass for computed multipliers."""
+        if self._multiplier is None:
+            raise ValueError("Multiplier not set. Override multiplier property in subclass.")
+        return self._multiplier
     
-    def correlation_series(self, asset1: str = None, asset2: str = None) -> pd.Series:
+    def mv(self) -> pd.DataFrame:
         """
-        Get rolling pairwise correlation as time series.
+        Returns scaled market values.
         
-        If asset1 and asset2 not specified, returns first off-diagonal (for 2-asset case).
+        mv = predecessor.mv() * multiplier
+        
+        Index: date
+        Columns: one column per instrument.
         """
-        # Ensure computed
-        _ = self.multiplier
+        pred_mv = self.predecessor.mv()
         
-        dates = sorted(self._rolling_corr.keys())
-        
-        if asset1 is None or asset2 is None:
-            # Default: first off-diagonal
-            corrs = [self._rolling_corr[d].iloc[0, 1] for d in dates]
+        if isinstance(self.multiplier, pd.Series):
+            result = pred_mv.multiply(self.multiplier, axis=0)
         else:
-            corrs = [self._rolling_corr[d].loc[asset1, asset2] for d in dates]
+            result = pred_mv * self.multiplier
         
-        return pd.Series(corrs, index=dates)
+        return result
+    
+    def mv_detail(self) -> pd.DataFrame:
+        """
+        Returns disaggregated market values.
+        
+        For ScalingNode, same as mv() but with predecessor name prefix.
+        """
+        mv = self.mv()
+        mv.columns = [f"{self.predecessor.name}.{col}" for col in mv.columns]
+        return mv
+    
+    def pnl(self) -> pd.DataFrame:
+        """
+        Returns aggregated pnl for this node.
+        
+        pnl(t) = mv(t-1) * r(t-1, t)
+        
+        Index: date
+        Columns: single column named after this node.
+        """
+        mv = self.mv()
+        returns = self.instrument_returns()
+        
+        instruments = [c for c in mv.columns if c in returns.columns]
+        
+        total_pnl = pd.Series(0.0, index=mv.index)
+        for instrument in instruments:
+            total_pnl += mv[instrument].shift(1) * returns[instrument]
+        
+        result = pd.DataFrame({self.name: total_pnl})
+        return result
