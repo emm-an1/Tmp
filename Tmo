@@ -1,52 +1,61 @@
-from collections import defaultdict
+# Pick one fast node to test
+test_node = NodeRegistry.get("AD1 Curncy_fast")
+print(f"Testing: {test_node.name}")
+print(f"Instruments: {test_node.instruments()}")
 
-# Build lookup: {instrument_id: {hl: node_name}}
-nodes_by_instrument = defaultdict(dict)
+# Check the chain
+print("\n--- Node chain ---")
+print(f"ScalingNode: {test_node.name}")
+print(f"  multiplier: {test_node._multiplier}")
+print(f"  predecessor: {test_node.predecessor.name}")
 
-for node in signal_nodes:
-    instrument_id = node.instruments()[0]
-    hl_str = node.name.split("_EMA")[-1]
-    hl = int(hl_str)
-    nodes_by_instrument[instrument_id][hl] = node.name
+ws_node = test_node.predecessor
+print(f"\nWeightedSumNode: {ws_node.name}")
+print(f"  weights: {ws_node._weights}")
+print(f"  predecessors: {[p.name for p in ws_node.predecessors]}")
 
-# Define speed groups
-speed_groups = {
-    "fast": [5, 10],
-    "medium": [20, 40],
-    "slow": [60, 120]
-}
+# Check mv calculation
+print("\n--- MV check ---")
+signal_5 = NodeRegistry.get("AD1 Curncy_trend_v3_EMA005")
+signal_10 = NodeRegistry.get("AD1 Curncy_trend_v3_EMA010")
 
-# Store created nodes
-trend_nodes = []
+# WeightedSum mv should be: signal_5.mv() * 1 + signal_10.mv() * 1
+ws_mv_expected = signal_5.mv() + signal_10.mv()
+ws_mv_actual = ws_node.mv()
+print(f"WeightedSum mv matches: {ws_mv_expected.equals(ws_mv_actual)}")
 
-# Create trend nodes for each instrument
-for instrument_id, hl_nodes in nodes_by_instrument.items():
-    for speed, hls in speed_groups.items():
-        # Get predecessor names
-        pred_names = [hl_nodes[hl] for hl in hls]
-        
-        # Weights all 1
-        weights = {name: 1.0 for name in pred_names}
-        
-        # Number of signals for scaling
-        n_signals = len(hls)
-        
-        # Weighted sum node
-        ws_name = f"{instrument_id}_{speed}_ws"
-        WeightedSumNode(
-            name=ws_name,
-            predecessors=pred_names,
-            weights=weights
-        )
-        
-        # Scale node (divide by n_signals)
-        scaled_name = f"{instrument_id}_{speed}"
-        scaled_node = ScalingNode(
-            name=scaled_name,
-            predecessors=[ws_name],
-            multiplier=1.0 / n_signals
-        )
-        
-        trend_nodes.append(scaled_node)
+# ScalingNode mv should be: ws_node.mv() * 0.5
+scaled_mv_expected = ws_node.mv() * 0.5
+scaled_mv_actual = test_node.mv()
+print(f"Scaled mv matches: {scaled_mv_expected.equals(scaled_mv_actual)}")
 
-print(f"Created {len(trend_nodes)} trend nodes")
+# Check pnl
+print("\n--- PnL check ---")
+print("Fast node pnl (first 5 rows):")
+print(test_node.pnl().head())
+
+print("\nComponent pnls (first 5 rows):")
+print("EMA005:", signal_5.pnl().head())
+print("EMA010:", signal_10.pnl().head())
+
+
+
+####
+
+import matplotlib.pyplot as plt
+
+# Plot cumulative pnl
+fig, ax = plt.subplots(figsize=(10, 6))
+
+signal_5 = NodeRegistry.get("AD1 Curncy_trend_v3_EMA005")
+signal_10 = NodeRegistry.get("AD1 Curncy_trend_v3_EMA010")
+fast_node = NodeRegistry.get("AD1 Curncy_fast")
+
+signal_5.pnl().cumsum().plot(ax=ax, label="EMA005")
+signal_10.pnl().cumsum().plot(ax=ax, label="EMA010")
+fast_node.pnl().cumsum().plot(ax=ax, label="Fast (combined)", linewidth=2)
+
+ax.legend()
+ax.set_title("AD1 Curncy: Fast trend components vs combined")
+plt.show()
+
