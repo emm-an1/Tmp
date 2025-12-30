@@ -1,3 +1,75 @@
+from abc import ABC, abstractmethod
+import pandas as pd
+
+from ..NodeRegistry import NodeRegistry
+
+
+class Node(ABC):
+    """Abstract base class for all portfolio tree nodes."""
+    
+    def __init__(self, name: str, predecessors: list[str] = None):
+        self.name = name
+        
+        self.predecessors = []
+        if predecessors:
+            for pred_name in predecessors:
+                self.predecessors.append(NodeRegistry.get(pred_name))
+        
+        NodeRegistry.register(self)
+    
+    @abstractmethod
+    def mv(self) -> pd.DataFrame:
+        """Returns market values for this node. Index=date."""
+        pass
+    
+    @abstractmethod
+    def pnl(self) -> pd.DataFrame:
+        """Returns profit and loss for this node. Index=date."""
+        pass
+    
+    def instruments(self) -> list[str]:
+        """Returns list of instrument names involved in this node."""
+        all_instruments = []
+        for pred in self.predecessors:
+            for instr in pred.instruments():
+                if instr not in all_instruments:
+                    all_instruments.append(instr)
+        return all_instruments
+    
+    def instrument_returns(self) -> pd.DataFrame:
+        """Returns the returns of all instruments involved in this node."""
+        dfs = []
+        for pred in self.predecessors:
+            pred_returns = pred.instrument_returns()
+            dfs.append(pred_returns)
+        
+        if not dfs:
+            return pd.DataFrame()
+        
+        result = dfs[0]
+        for df in dfs[1:]:
+            new_cols = [c for c in df.columns if c not in result.columns]
+            if new_cols:
+                result = result.join(df[new_cols], how="outer")
+        
+        return result
+    
+    def dir(self):
+        """Print all callable public methods."""
+        methods = [
+            attr for attr in dir(self)
+            if callable(getattr(self, attr)) and not attr.startswith('_') and not attr.endswith('_')
+        ]
+        for method in methods:
+            print(method)
+    
+    def __repr__(self) -> str:
+        pred_names = [p.name for p in self.predecessors]
+        return f"{self.__class__.__name__}(name='{self.name}', predecessors={pred_names})"
+
+
+
+########-----
 from typing import List
 import pandas as pd
 
@@ -15,7 +87,7 @@ class PrecomputedUVTrendSignalNode(Node):
     A proper TrendSignalNode would compute signals from InstrumentNode data.
     """
     
-    def __init__(self, name: str, predecessors: List[str], signal_name: str, data: pd.DataFrame):
+    def __init__(self, name: str, predecessors: list[str], signal_name: str, data: pd.DataFrame):
         """
         Args:
             name: Node name (typically f"{instrument_id}_{signal_name}")
@@ -33,22 +105,19 @@ class PrecomputedUVTrendSignalNode(Node):
         self._signal_name = signal_name
         
         # Extract mv (index is already date)
-        self._mv = data[["$_position"]].copy()
-        self._mv = self._mv.rename(columns={"$_position": self.predecessor.name})
+        self._mv = data[["$_position"]].rename(columns={"$_position": self.instruments()[0]})
         
         # Extract pnl (index is already date)
-        self._pnl = data[["PnL_UnitVol"]].copy()
-        self._pnl = self._pnl.rename(columns={"PnL_UnitVol": self.name})
+        self._pnl = data[["PnL_UnitVol"]].rename(columns={"PnL_UnitVol": self.name})
     
     @property
     def predecessor(self) -> Node:
         """Convenience accessor for single predecessor."""
         return self.predecessors[0]
     
-    @property
-    def instrument_id(self) -> str:
-        """Get instrument_id from predecessor."""
-        return self.predecessor.name
+    def instruments(self) -> list[str]:
+        """Returns the underlying instrument name."""
+        return [self.predecessor.name]
     
     def mv(self) -> pd.DataFrame:
         """
@@ -67,11 +136,5 @@ class PrecomputedUVTrendSignalNode(Node):
         Columns: node name
         """
         return self._pnl.copy()
-    
-    def instrument_returns(self) -> pd.DataFrame:
-        """
-        Returns returns of the underlying instrument.
-        
-        Delegates to predecessor (InstrumentNode).
-        """
-        return self.predecessor.instrument_returns()
+
+
