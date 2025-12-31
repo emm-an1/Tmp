@@ -1,48 +1,40 @@
-################################################################################
-# HIERARCHICAL GROUP CREATION FROM EXCEL
-################################################################################
-"""
-# Example groups.xlsx structure:
-# | instrument | level_1    | level_2      | level_3 |
-# |------------|------------|--------------|---------|
-# | NO1 Index  | JP_equity  | Asia_equity  | Equity  |
-# | TP1 Index  | JP_equity  | Asia_equity  | Equity  |
-# | HSI Index  | HK_equity  | Asia_equity  | Equity  |
-# | ES1 Index  | US_equity  | DM_equity    | Equity  |
-# | NQ1 Index  | US_equity  | DM_equity    | Equity  |
-
-import pandas as pd
-from collections import defaultdict
-
 def create_group_nodes(groups_df: pd.DataFrame, speed: str, years: float = 5):
     '''
     Create hierarchical group nodes from Excel mapping.
     
     Args:
-        groups_df: DataFrame with columns [instrument, level_1, level_2, ...]
+        groups_df: DataFrame with columns [instrument, weight_1, level_1, weight_2, level_2, ...]
         speed: "fast", "medium", or "slow"
         years: Rolling window for correlation scaling
     '''
-    # Get level columns (all except 'instrument')
-    level_cols = [c for c in groups_df.columns if c != 'instrument']
+    # Parse columns: find level_N and weight_N pairs
+    level_cols = sorted([c for c in groups_df.columns if c.startswith('level_')])
     
     # Process each level from left to right
     for level_idx, level_col in enumerate(level_cols):
+        level_num = level_col.split('_')[1]  # e.g., "1" from "level_1"
+        weight_col = f"weight_{level_num}"
         
         # Get unique groups at this level
         groups = groups_df[level_col].dropna().unique()
         
         for group_name in groups:
-            # Get members for this group
+            # Get rows for this group
+            group_rows = groups_df[groups_df[level_col] == group_name]
+            
             if level_idx == 0:
                 # First level: members are instrument nodes
-                members = groups_df[groups_df[level_col] == group_name]['instrument'].tolist()
+                members = group_rows['instrument'].tolist()
                 pred_names = [f"{m}_{speed}" for m in members]
+                member_weights = group_rows[weight_col].tolist()
             else:
                 # Higher levels: members are previous level groups
                 prev_level_col = level_cols[level_idx - 1]
-                members = groups_df[groups_df[level_col] == group_name][prev_level_col].dropna().unique().tolist()
+                # Get unique previous-level groups with their weights
+                member_data = group_rows[[prev_level_col, weight_col]].drop_duplicates()
+                members = member_data[prev_level_col].tolist()
                 pred_names = [f"{m}_{speed}" for m in members]
+                member_weights = member_data[weight_col].tolist()
             
             # Skip if only one member (no aggregation needed)
             if len(pred_names) <= 1:
@@ -54,8 +46,8 @@ def create_group_nodes(groups_df: pd.DataFrame, speed: str, years: float = 5):
                 print(f"Skipping {group_name}_{speed}: missing predecessors {missing}")
                 continue
             
-            # Create weighted sum (equal weights)
-            weights = {name: 1.0 for name in pred_names}
+            # Create weights dict
+            weights = {name: w for name, w in zip(pred_names, member_weights)}
             ws_name = f"{group_name}_{speed}_ws"
             
             WeightedSumNode(
@@ -71,10 +63,9 @@ def create_group_nodes(groups_df: pd.DataFrame, speed: str, years: float = 5):
                 years=years
             )
             
-            print(f"Created {group_name}_{speed}")
+            print(f"Created {group_name}_{speed} with weights {weights}")
 
 # Usage:
 # groups_df = pd.read_excel("config/groups.xlsx")
 # for speed in ["fast", "medium", "slow"]:
 #     create_group_nodes(groups_df, speed)
-"""
