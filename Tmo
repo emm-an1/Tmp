@@ -1,47 +1,293 @@
-uv_node = NodeRegistry.get("oil_complex_fast")
-ws_node = NodeRegistry.get("oil_complex_fast_ws")
+################################################################################
+# FILE: src/portfolio_tree/NodeRegistry.py
+################################################################################
 
-# Check 1: Multiplier makes sense
-print("Multiplier (last 5 values):")
-print(uv_node.multiplier.dropna().tail())
+class NodeRegistry:
+    """Registry to look up nodes by name."""
+    
+    _nodes = {}  # {name: node}
+    _metadata = {}  # {name: {type, predecessors, ...}}
+    
+    @classmethod
+    def register(cls, node):
+        """Register a node. Called automatically on node creation."""
+        if node.name in cls._nodes:
+            raise ValueError(f"Node with name '{node.name}' already exists.")
+        
+        cls._nodes[node.name] = node
+        cls._metadata[node.name] = {
+            "type": node.__class__.__name__,
+            "predecessors": [p.name for p in node.predecessors],
+            "n_predecessors": len(node.predecessors),
+            "instruments": node.instruments() if hasattr(node, 'instruments') else []
+        }
+    
+    @classmethod
+    def get(cls, name: str):
+        """Get a node by name."""
+        if name not in cls._nodes:
+            raise KeyError(f"Node '{name}' not found. Available: {list(cls._nodes.keys())}")
+        return cls._nodes[name]
+    
+    @classmethod
+    def get_metadata(cls, name: str) -> dict:
+        """Get metadata for a node."""
+        if name not in cls._metadata:
+            raise KeyError(f"Node '{name}' not found.")
+        return cls._metadata[name]
+    
+    @classmethod
+    def find(cls, pattern: str, node_type: str = None) -> list[str]:
+        """
+        Find nodes by partial name match.
+        
+        Args:
+            pattern: Substring to search for (case-insensitive)
+            node_type: Optional filter by node type (e.g., "InstrumentNode", "WeightedSumNode")
+        
+        Returns:
+            List of matching node names
+        """
+        matches = []
+        pattern_lower = pattern.lower()
+        
+        for name, meta in cls._metadata.items():
+            if pattern_lower not in name.lower():
+                continue
+            
+            if node_type is not None and meta["type"] != node_type:
+                continue
+            
+            matches.append(name)
+        
+        return sorted(matches)
+    
+    @classmethod
+    def find_by_type(cls, node_type: str) -> list[str]:
+        """Find all nodes of a specific type."""
+        return [name for name, meta in cls._metadata.items() if meta["type"] == node_type]
+    
+    @classmethod
+    def find_by_instrument(cls, instrument: str) -> list[str]:
+        """Find all nodes that involve a specific instrument."""
+        return [name for name, meta in cls._metadata.items() if instrument in meta["instruments"]]
+    
+    @classmethod
+    def clear(cls):
+        """Clear all registered nodes. Useful for testing."""
+        cls._nodes = {}
+        cls._metadata = {}
+    
+    @classmethod
+    def clear_node(cls, name: str, clear_successors: bool = False):
+        """
+        Remove a single node from registry.
+        
+        Args:
+            name: Node name to remove
+            clear_successors: If True, also remove nodes that depend on this node
+        """
+        if name not in cls._nodes:
+            raise KeyError(f"Node '{name}' not found.")
+        
+        if clear_successors:
+            # Find and clear all nodes that have this node as predecessor
+            successors = [
+                n for n, meta in cls._metadata.items() 
+                if name in meta["predecessors"]
+            ]
+            for succ in successors:
+                cls.clear_node(succ, clear_successors=True)
+        
+        # Remove node
+        del cls._nodes[name]
+        del cls._metadata[name]
+    
+    @classmethod
+    def list_nodes(cls):
+        """List all registered node names."""
+        return list(cls._nodes.keys())
+    
+    @classmethod
+    def summary(cls) -> dict:
+        """Return summary of registered nodes by type."""
+        type_counts = {}
+        for meta in cls._metadata.values():
+            t = meta["type"]
+            type_counts[t] = type_counts.get(t, 0) + 1
+        return type_counts
 
-# Check 2: mv is scaled correctly
-ws_mv = ws_node.mv()
-uv_mv = uv_node.mv()
-manual_uv_mv = ws_mv.multiply(uv_node.multiplier, axis=0)
 
-print(f"\nmv scaling check (max diff): {(uv_mv - manual_uv_mv).abs().max().max()}")
 
-# Check 3: pnl replication
-mv = uv_node.mv()
-returns = uv_node.instrument_returns()
-instruments = uv_node.instruments()
 
-replicated_pnl = sum(mv[inst].shift(1) * returns[inst] for inst in instruments)
-node_pnl = uv_node.pnl()[uv_node.name]
+######
 
-print(f"pnl replication check (max diff): {(replicated_pnl - node_pnl).abs().max()}")
+from portfolio_tree.visualize import show_tree, tree_to_mermaid
 
-# Check 4: Is it unit vol?
-pnl_clean = node_pnl.dropna()
-rolling_std = pnl_clean.rolling(252).std()
+# Text tree - show what feeds into oil_complex_fast
+show_tree("oil_complex_fast", direction="down")
+# Output:
+# oil_complex_fast [CorrAdjustedUVScalingNode]
+# └── oil_complex_fast_ws [WeightedSumNode]
+#     ├── LN1 Comdty_fast [ScalingNode]
+#     │   └── LN1 Comdty_fast_ws [WeightedSumNode]
+#     │       ├── LN1 Comdty_trend_v3_EMA005 [PrecomputedUVTrendSignalNode]
+#     │       │   └── LN1 Comdty [InstrumentNode]
+#     │       └── LN1 Comdty_trend_v3_EMA010 [PrecomputedUVTrendSignalNode]
+#     │           └── LN1 Comdty [InstrumentNode]
+#     └── CO1 Comdty_fast [ScalingNode]
+#         └── ...
 
-print(f"\nRolling 1Y std (should be ~1.0):")
-print(f"  Mean: {rolling_std.mean():.4f}")
-print(f"  Min:  {rolling_std.min():.4f}")
-print(f"  Max:  {rolling_std.max():.4f}")
+# Limit depth
+show_tree("oil_complex_fast", direction="down", depth=2)
 
-# Plot
-import matplotlib.pyplot as plt
+# Show what uses this node
+show_tree("oil_complex_fast", direction="up")
 
-fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+# Both directions
+show_tree("oil_complex_fast", direction="both")
 
-# Cumulative pnl
-node_pnl.cumsum().plot(ax=axes[0], title=f"Cumulative PnL: {uv_node.name}")
+# Mermaid for notebooks
+from IPython.display import display, Markdown
+mermaid_code = tree_to_mermaid("oil_complex_fast", depth=3)
+display(Markdown(f"```mermaid\n{mermaid_code}\n```"))
+###
 
-# Rolling std
-rolling_std.plot(ax=axes[1], title="Rolling 1Y std (target = 1.0)")
-axes[1].axhline(y=1.0, color='red', linestyle='--')
 
-plt.tight_layout()
-plt.show()
+# src/portfolio_tree/visualize.py
+
+from .NodeRegistry import NodeRegistry
+
+
+def show_tree(node_name: str, direction: str = "down", depth: int = None, show_types: bool = True):
+    """
+    Print text tree from a node.
+    
+    Args:
+        node_name: Starting node
+        direction: "down" (predecessors), "up" (successors), "both"
+        depth: Max levels to show (None = all)
+        show_types: Show node type in brackets
+    """
+    node = NodeRegistry.get(node_name)
+    
+    if direction == "both":
+        print("=== Ancestors (what this feeds into) ===")
+        _print_ancestors(node_name, show_types, depth)
+        print(f"\n=== {node_name} ===\n")
+        print("=== Descendants (what feeds into this) ===")
+        _print_descendants(node, "", True, show_types, depth, 0)
+    elif direction == "up":
+        _print_ancestors(node_name, show_types, depth)
+    else:  # down
+        _print_descendants(node, "", True, show_types, depth, 0)
+
+
+def _print_descendants(node, prefix: str, is_last: bool, show_types: bool, max_depth: int, current_depth: int):
+    """Recursively print predecessors (what feeds into this node)."""
+    
+    # Check depth limit
+    if max_depth is not None and current_depth > max_depth:
+        return
+    
+    # Build node label
+    connector = "└── " if is_last else "├── "
+    type_str = f" [{NodeRegistry.get_metadata(node.name)['type']}]" if show_types else ""
+    
+    if current_depth == 0:
+        print(f"{node.name}{type_str}")
+    else:
+        print(f"{prefix}{connector}{node.name}{type_str}")
+    
+    # Prepare prefix for children
+    if current_depth == 0:
+        child_prefix = ""
+    else:
+        child_prefix = prefix + ("    " if is_last else "│   ")
+    
+    # Print predecessors
+    predecessors = node.predecessors
+    for i, pred in enumerate(predecessors):
+        is_last_pred = (i == len(predecessors) - 1)
+        _print_descendants(pred, child_prefix, is_last_pred, show_types, max_depth, current_depth + 1)
+
+
+def _print_ancestors(node_name: str, show_types: bool, max_depth: int):
+    """Find and print nodes that have this node as predecessor (successors)."""
+    
+    # Find all nodes that have node_name as predecessor
+    successors = []
+    for name in NodeRegistry.list_nodes():
+        meta = NodeRegistry.get_metadata(name)
+        if node_name in meta["predecessors"]:
+            successors.append(name)
+    
+    if not successors:
+        print(f"(no nodes use {node_name} as input)")
+        return
+    
+    for succ_name in successors:
+        type_str = f" [{NodeRegistry.get_metadata(succ_name)['type']}]" if show_types else ""
+        print(f"→ {succ_name}{type_str}")
+        
+        # Recursively find ancestors of this successor
+        if max_depth is None or max_depth > 1:
+            sub_ancestors = _get_ancestors(succ_name, max_depth - 1 if max_depth else None)
+            for anc in sub_ancestors:
+                type_str = f" [{NodeRegistry.get_metadata(anc)['type']}]" if show_types else ""
+                print(f"  → {anc}{type_str}")
+
+
+def _get_ancestors(node_name: str, max_depth: int) -> list[str]:
+    """Get list of nodes that use this node as input."""
+    if max_depth is not None and max_depth <= 0:
+        return []
+    
+    ancestors = []
+    for name in NodeRegistry.list_nodes():
+        meta = NodeRegistry.get_metadata(name)
+        if node_name in meta["predecessors"]:
+            ancestors.append(name)
+            ancestors.extend(_get_ancestors(name, max_depth - 1 if max_depth else None))
+    
+    return ancestors
+
+
+def tree_to_mermaid(node_name: str, direction: str = "down", depth: int = None) -> str:
+    """
+    Generate Mermaid diagram code for rendering in notebooks.
+    
+    Usage in notebook:
+        from IPython.display import display, Markdown
+        display(Markdown(f"```mermaid\\n{tree_to_mermaid('node_name')}\\n```"))
+    """
+    lines = ["graph TD"]
+    visited = set()
+    
+    node = NodeRegistry.get(node_name)
+    _build_mermaid(node, lines, visited, depth, 0)
+    
+    return "\n".join(lines)
+
+
+def _build_mermaid(node, lines: list, visited: set, max_depth: int, current_depth: int):
+    """Recursively build mermaid graph."""
+    
+    if max_depth is not None and current_depth > max_depth:
+        return
+    
+    if node.name in visited:
+        return
+    visited.add(node.name)
+    
+    # Sanitize node name for mermaid (replace spaces, special chars)
+    safe_name = node.name.replace(" ", "_").replace("-", "_")
+    node_type = NodeRegistry.get_metadata(node.name)["type"]
+    short_type = node_type.replace("Node", "")
+    
+    for pred in node.predecessors:
+        safe_pred = pred.name.replace(" ", "_").replace("-", "_")
+        lines.append(f"    {safe_pred}[{pred.name}] --> {safe_name}[{node.name}]")
+        _build_mermaid(pred, lines, visited, max_depth, current_depth + 1)
+
+
