@@ -1,23 +1,47 @@
-node = NodeRegistry.get("oil_complex_fast_ws")
+uv_node = NodeRegistry.get("oil_complex_fast")
+ws_node = NodeRegistry.get("oil_complex_fast_ws")
 
-# Get mv and returns
-mv = node.mv()
-returns = node.instrument_returns()
-instruments = node.instruments()
+# Check 1: Multiplier makes sense
+print("Multiplier (last 5 values):")
+print(uv_node.multiplier.dropna().tail())
 
-# Replicate pnl: sum of mv(t-1) * r(t)
+# Check 2: mv is scaled correctly
+ws_mv = ws_node.mv()
+uv_mv = uv_node.mv()
+manual_uv_mv = ws_mv.multiply(uv_node.multiplier, axis=0)
+
+print(f"\nmv scaling check (max diff): {(uv_mv - manual_uv_mv).abs().max().max()}")
+
+# Check 3: pnl replication
+mv = uv_node.mv()
+returns = uv_node.instrument_returns()
+instruments = uv_node.instruments()
+
 replicated_pnl = sum(mv[inst].shift(1) * returns[inst] for inst in instruments)
+node_pnl = uv_node.pnl()[uv_node.name]
 
-# Get node's pnl
-node_pnl = node.pnl()[node.name]
+print(f"pnl replication check (max diff): {(replicated_pnl - node_pnl).abs().max()}")
 
-# Compare
-print("First 10 values:")
-print(pd.DataFrame({
-    "replicated": replicated_pnl,
-    "node_pnl": node_pnl,
-    "diff": replicated_pnl - node_pnl
-}).dropna().head(10))
+# Check 4: Is it unit vol?
+pnl_clean = node_pnl.dropna()
+rolling_std = pnl_clean.rolling(252).std()
 
-print(f"\nMax absolute difference: {(replicated_pnl - node_pnl).abs().max()}")
-print(f"Match: {(replicated_pnl - node_pnl).abs().max() < 1e-10}")
+print(f"\nRolling 1Y std (should be ~1.0):")
+print(f"  Mean: {rolling_std.mean():.4f}")
+print(f"  Min:  {rolling_std.min():.4f}")
+print(f"  Max:  {rolling_std.max():.4f}")
+
+# Plot
+import matplotlib.pyplot as plt
+
+fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+
+# Cumulative pnl
+node_pnl.cumsum().plot(ax=axes[0], title=f"Cumulative PnL: {uv_node.name}")
+
+# Rolling std
+rolling_std.plot(ax=axes[1], title="Rolling 1Y std (target = 1.0)")
+axes[1].axhline(y=1.0, color='red', linestyle='--')
+
+plt.tight_layout()
+plt.show()
