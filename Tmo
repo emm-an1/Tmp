@@ -1,30 +1,7 @@
-ws_node = NodeRegistry.get("oil_complex_trend_ws")
-mv = ws_node.mv()
+# What's the first signal node for oil?
+signal_node = NodeRegistry.find("oil", node_type="PrecomputedUVTrendSignalNode")[0]
+signal = NodeRegistry.get(signal_node)
 
-print("First 20 rows:")
-print(mv.head(20))
-
-print("\nValue counts for first column around early dates:")
-print(mv.iloc[:50].sum(axis=1).value_counts())
-
-
-fast_node = NodeRegistry.get("oil_complex_fast")
-med_node = NodeRegistry.get("oil_complex_medium")
-slow_node = NodeRegistry.get("oil_complex_slow")
-
-print("Fast mv first date:", fast_node.mv().index[0])
-print("Medium mv first date:", med_node.mv().index[0])
-print("Slow mv first date:", slow_node.mv().index[0])
-
-
-fast_pnl = NodeRegistry.get("oil_complex_fast").pnl()
-slow_pnl = NodeRegistry.get("oil_complex_slow").pnl()
-
-# Combine
-combined = fast_pnl.join(slow_pnl, how="outer")
-combined.columns = ["fast", "slow"]
-
-# Count overlapping non-NaN
-both_valid = combined.dropna()
-print(f"First date both valid: {both_valid.index[0]}")
-print(f"Total overlapping observations: {len(both_valid)}")
+print("Signal mv first date:", signal.mv().index[0])
+print("Signal mv first VALID (non-zero/non-NaN):", signal.mv().replace(0, float('nan')).first_valid_index())
+print("Signal pnl first valid:", signal.pnl().first_valid_index())
