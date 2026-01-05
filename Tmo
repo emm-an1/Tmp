@@ -1,1 +1,25 @@
-aaa
+def __init__(self, name: str, predecessors: list[str], weights: dict[str, float] | list[float]):
+    # Call parent constructor (handles predecessor lookup and registration)
+    super().__init__(name=name, predecessors=predecessors)
+    
+    # Convert list to dict if needed
+    if isinstance(weights, list):
+        if len(weights) != len(predecessors):
+            raise ValueError(
+                f"weights list length ({len(weights)}) must match predecessors length ({len(predecessors)})"
+            )
+        weights = {pred: w for pred, w in zip(predecessors, weights)}
+    
+    # Validate weights match predecessors exactly
+    predecessor_names = {p.name for p in self.predecessors}
+    weight_names = set(weights.keys())
+    
+    if predecessor_names != weight_names:
+        missing = predecessor_names - weight_names
+        extra = weight_names - predecessor_names
+        raise ValueError(
+            f"Weights must match predecessors exactly. "
+            f"Missing weights for: {missing}. Extra weights: {extra}."
+        )
+    
+    self._weights = weights
