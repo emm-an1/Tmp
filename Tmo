@@ -1,25 +1,23 @@
-def __init__(self, name: str, predecessors: list[str], weights: dict[str, float] | list[float]):
-    # Call parent constructor (handles predecessor lookup and registration)
-    super().__init__(name=name, predecessors=predecessors)
-    
-    # Convert list to dict if needed
-    if isinstance(weights, list):
-        if len(weights) != len(predecessors):
-            raise ValueError(
-                f"weights list length ({len(weights)}) must match predecessors length ({len(predecessors)})"
-            )
-        weights = {pred: w for pred, w in zip(predecessors, weights)}
-    
-    # Validate weights match predecessors exactly
-    predecessor_names = {p.name for p in self.predecessors}
-    weight_names = set(weights.keys())
-    
-    if predecessor_names != weight_names:
-        missing = predecessor_names - weight_names
-        extra = weight_names - predecessor_names
-        raise ValueError(
-            f"Weights must match predecessors exactly. "
-            f"Missing weights for: {missing}. Extra weights: {extra}."
-        )
-    
-    self._weights = weights
+node = NodeRegistry.get("oil_complex_fast_ws")
+
+# Get mv and returns
+mv = node.mv()
+returns = node.instrument_returns()
+instruments = node.instruments()
+
+# Replicate pnl: sum of mv(t-1) * r(t)
+replicated_pnl = sum(mv[inst].shift(1) * returns[inst] for inst in instruments)
+
+# Get node's pnl
+node_pnl = node.pnl()[node.name]
+
+# Compare
+print("First 10 values:")
+print(pd.DataFrame({
+    "replicated": replicated_pnl,
+    "node_pnl": node_pnl,
+    "diff": replicated_pnl - node_pnl
+}).dropna().head(10))
+
+print(f"\nMax absolute difference: {(replicated_pnl - node_pnl).abs().max()}")
+print(f"Match: {(replicated_pnl - node_pnl).abs().max() < 1e-10}")
