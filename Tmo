@@ -1,159 +1,3 @@
-################################################################################
-# FILE: src/portfolio_tree/NodeRegistry.py
-################################################################################
-
-class NodeRegistry:
-    """Registry to look up nodes by name."""
-    
-    _nodes = {}  # {name: node}
-    _metadata = {}  # {name: {type, predecessors, ...}}
-    
-    @classmethod
-    def register(cls, node):
-        """Register a node. Called automatically on node creation."""
-        if node.name in cls._nodes:
-            raise ValueError(f"Node with name '{node.name}' already exists.")
-        
-        cls._nodes[node.name] = node
-        cls._metadata[node.name] = {
-            "type": node.__class__.__name__,
-            "predecessors": [p.name for p in node.predecessors],
-            "n_predecessors": len(node.predecessors),
-            "instruments": node.instruments() if hasattr(node, 'instruments') else []
-        }
-    
-    @classmethod
-    def get(cls, name: str):
-        """Get a node by name."""
-        if name not in cls._nodes:
-            raise KeyError(f"Node '{name}' not found. Available: {list(cls._nodes.keys())}")
-        return cls._nodes[name]
-    
-    @classmethod
-    def get_metadata(cls, name: str) -> dict:
-        """Get metadata for a node."""
-        if name not in cls._metadata:
-            raise KeyError(f"Node '{name}' not found.")
-        return cls._metadata[name]
-    
-    @classmethod
-    def find(cls, pattern: str, node_type: str = None) -> list[str]:
-        """
-        Find nodes by partial name match.
-        
-        Args:
-            pattern: Substring to search for (case-insensitive)
-            node_type: Optional filter by node type (e.g., "InstrumentNode", "WeightedSumNode")
-        
-        Returns:
-            List of matching node names
-        """
-        matches = []
-        pattern_lower = pattern.lower()
-        
-        for name, meta in cls._metadata.items():
-            if pattern_lower not in name.lower():
-                continue
-            
-            if node_type is not None and meta["type"] != node_type:
-                continue
-            
-            matches.append(name)
-        
-        return sorted(matches)
-    
-    @classmethod
-    def find_by_type(cls, node_type: str) -> list[str]:
-        """Find all nodes of a specific type."""
-        return [name for name, meta in cls._metadata.items() if meta["type"] == node_type]
-    
-    @classmethod
-    def find_by_instrument(cls, instrument: str) -> list[str]:
-        """Find all nodes that involve a specific instrument."""
-        return [name for name, meta in cls._metadata.items() if instrument in meta["instruments"]]
-    
-    @classmethod
-    def clear(cls):
-        """Clear all registered nodes. Useful for testing."""
-        cls._nodes = {}
-        cls._metadata = {}
-    
-    @classmethod
-    def clear_node(cls, name: str, clear_successors: bool = False):
-        """
-        Remove a single node from registry.
-        
-        Args:
-            name: Node name to remove
-            clear_successors: If True, also remove nodes that depend on this node
-        """
-        if name not in cls._nodes:
-            raise KeyError(f"Node '{name}' not found.")
-        
-        if clear_successors:
-            # Find and clear all nodes that have this node as predecessor
-            successors = [
-                n for n, meta in cls._metadata.items() 
-                if name in meta["predecessors"]
-            ]
-            for succ in successors:
-                cls.clear_node(succ, clear_successors=True)
-        
-        # Remove node
-        del cls._nodes[name]
-        del cls._metadata[name]
-    
-    @classmethod
-    def list_nodes(cls):
-        """List all registered node names."""
-        return list(cls._nodes.keys())
-    
-    @classmethod
-    def summary(cls) -> dict:
-        """Return summary of registered nodes by type."""
-        type_counts = {}
-        for meta in cls._metadata.values():
-            t = meta["type"]
-            type_counts[t] = type_counts.get(t, 0) + 1
-        return type_counts
-
-
-
-
-######
-
-from portfolio_tree.visualize import show_tree, tree_to_mermaid
-
-# Text tree - show what feeds into oil_complex_fast
-show_tree("oil_complex_fast", direction="down")
-# Output:
-# oil_complex_fast [CorrAdjustedUVScalingNode]
-# └── oil_complex_fast_ws [WeightedSumNode]
-#     ├── LN1 Comdty_fast [ScalingNode]
-#     │   └── LN1 Comdty_fast_ws [WeightedSumNode]
-#     │       ├── LN1 Comdty_trend_v3_EMA005 [PrecomputedUVTrendSignalNode]
-#     │       │   └── LN1 Comdty [InstrumentNode]
-#     │       └── LN1 Comdty_trend_v3_EMA010 [PrecomputedUVTrendSignalNode]
-#     │           └── LN1 Comdty [InstrumentNode]
-#     └── CO1 Comdty_fast [ScalingNode]
-#         └── ...
-
-# Limit depth
-show_tree("oil_complex_fast", direction="down", depth=2)
-
-# Show what uses this node
-show_tree("oil_complex_fast", direction="up")
-
-# Both directions
-show_tree("oil_complex_fast", direction="both")
-
-# Mermaid for notebooks
-from IPython.display import display, Markdown
-mermaid_code = tree_to_mermaid("oil_complex_fast", depth=3)
-display(Markdown(f"```mermaid\n{mermaid_code}\n```"))
-###
-
-
 # src/portfolio_tree/visualize.py
 
 from .NodeRegistry import NodeRegistry
@@ -161,7 +5,7 @@ from .NodeRegistry import NodeRegistry
 
 def show_tree(node_name: str, direction: str = "down", depth: int = None, show_types: bool = True):
     """
-    Print text tree from a node.
+    Print text tree from a node (left to right flow).
     
     Args:
         node_name: Starting node
@@ -176,46 +20,164 @@ def show_tree(node_name: str, direction: str = "down", depth: int = None, show_t
         _print_ancestors(node_name, show_types, depth)
         print(f"\n=== {node_name} ===\n")
         print("=== Descendants (what feeds into this) ===")
-        _print_descendants(node, "", True, show_types, depth, 0)
+        _print_tree_horizontal(node, show_types, depth)
     elif direction == "up":
         _print_ancestors(node_name, show_types, depth)
     else:  # down
-        _print_descendants(node, "", True, show_types, depth, 0)
+        _print_tree_horizontal(node, show_types, depth)
 
 
-def _print_descendants(node, prefix: str, is_last: bool, show_types: bool, max_depth: int, current_depth: int):
-    """Recursively print predecessors (what feeds into this node)."""
+def _print_tree_horizontal(node, show_types: bool, max_depth: int):
+    """Print tree with predecessors on left, node on right."""
+    lines = []
+    _build_horizontal_tree(node, lines, show_types, max_depth, 0)
     
-    # Check depth limit
+    # Find the rightmost node position for alignment
+    for line in lines:
+        print(line)
+
+
+def _build_horizontal_tree(node, lines: list, show_types: bool, max_depth: int, current_depth: int) -> list[int]:
+    """
+    Build horizontal tree recursively.
+    Returns list of line indices where this node's outputs connect.
+    """
     if max_depth is not None and current_depth > max_depth:
-        return
+        type_str = f" [{NodeRegistry.get_metadata(node.name)['type']}]" if show_types else ""
+        lines.append(f"{node.name}{type_str} ...")
+        return [len(lines) - 1]
     
-    # Build node label
-    connector = "└── " if is_last else "├── "
     type_str = f" [{NodeRegistry.get_metadata(node.name)['type']}]" if show_types else ""
+    node_label = f"{node.name}{type_str}"
     
-    if current_depth == 0:
-        print(f"{node.name}{type_str}")
-    else:
-        print(f"{prefix}{connector}{node.name}{type_str}")
+    # Base case: no predecessors
+    if not node.predecessors:
+        lines.append(node_label)
+        return [len(lines) - 1]
     
-    # Prepare prefix for children
-    if current_depth == 0:
-        child_prefix = ""
-    else:
-        child_prefix = prefix + ("    " if is_last else "│   ")
+    # Recursive case: get all predecessor trees
+    pred_line_indices = []
+    for pred in node.predecessors:
+        indices = _build_horizontal_tree(pred, lines, show_types, max_depth, current_depth + 1)
+        pred_line_indices.extend(indices)
     
-    # Print predecessors
-    predecessors = node.predecessors
-    for i, pred in enumerate(predecessors):
-        is_last_pred = (i == len(predecessors) - 1)
-        _print_descendants(pred, child_prefix, is_last_pred, show_types, max_depth, current_depth + 1)
+    # Find middle line for connection
+    if pred_line_indices:
+        mid_idx = pred_line_indices[len(pred_line_indices) // 2]
+        
+        # Add arrows to predecessor lines
+        for i, idx in enumerate(pred_line_indices):
+            if idx < len(lines):
+                if i == 0 and len(pred_line_indices) > 1:
+                    lines[idx] = lines[idx] + " ──┐"
+                elif i == len(pred_line_indices) - 1 and len(pred_line_indices) > 1:
+                    lines[idx] = lines[idx] + " ──┘"
+                elif i == len(pred_line_indices) // 2:
+                    lines[idx] = lines[idx] + " ──┼── " + node_label
+                else:
+                    lines[idx] = lines[idx] + " ──┤"
+        
+        # Add vertical connectors between first and last predecessor
+        if len(pred_line_indices) > 1:
+            max_len = max(len(lines[idx].split("──")[0]) for idx in pred_line_indices)
+            for idx in range(pred_line_indices[0] + 1, pred_line_indices[-1]):
+                if idx not in pred_line_indices:
+                    lines[idx] = lines[idx].ljust(max_len) + "   │"
+    
+    return [pred_line_indices[len(pred_line_indices) // 2]] if pred_line_indices else []
+
+
+def show_tree_simple(node_name: str, depth: int = None, show_types: bool = True):
+    """
+    Simple left-to-right ASCII tree.
+    
+    Example output:
+    LN1 Comdty ─────────────────────────────────┐
+    LN1 Comdty_trend_v3_EMA005 ──┐              │
+    LN1 Comdty ──────────────────┼── LN1 Comdty_fast_ws ──┐
+    LN1 Comdty_trend_v3_EMA010 ──┘                        │
+                                                          ├── oil_complex_fast_ws ── oil_complex_fast
+    CO1 Comdty ─────────────────────────────────┐         │
+    CO1 Comdty_trend_v3_EMA005 ──┐              │         │
+    CO1 Comdty ──────────────────┼── CO1 Comdty_fast_ws ──┘
+    CO1 Comdty_trend_v3_EMA010 ──┘
+    """
+    node = NodeRegistry.get(node_name)
+    tree_lines = _build_simple_tree(node, show_types, depth, 0)
+    print("\n".join(tree_lines))
+
+
+def _build_simple_tree(node, show_types: bool, max_depth: int, current_depth: int) -> list[str]:
+    """Build simple tree returning list of lines."""
+    
+    type_str = f" [{_short_type(node.name)}]" if show_types else ""
+    node_label = f"{node.name}{type_str}"
+    
+    # Check depth
+    if max_depth is not None and current_depth > max_depth:
+        return [node_label + " ..."]
+    
+    # Base case: no predecessors (leaf)
+    if not node.predecessors:
+        return [node_label]
+    
+    # Single predecessor: simple arrow
+    if len(node.predecessors) == 1:
+        pred_lines = _build_simple_tree(node.predecessors[0], show_types, max_depth, current_depth + 1)
+        # Append arrow to last line
+        pred_lines[-1] = pred_lines[-1] + " ── " + node_label
+        return pred_lines
+    
+    # Multiple predecessors: branching
+    all_pred_lines = []
+    for i, pred in enumerate(node.predecessors):
+        pred_lines = _build_simple_tree(pred, show_types, max_depth, current_depth + 1)
+        all_pred_lines.append(pred_lines)
+    
+    # Combine with branching
+    result = []
+    total_preds = len(all_pred_lines)
+    mid_point = total_preds // 2
+    
+    for i, pred_lines in enumerate(all_pred_lines):
+        for j, line in enumerate(pred_lines):
+            if j == len(pred_lines) - 1:  # Last line of this predecessor
+                if i == 0:
+                    result.append(line + " ──┐")
+                elif i == total_preds - 1:
+                    result.append(line + " ──┘")
+                elif i == mid_point:
+                    result.append(line + " ──┼── " + node_label)
+                else:
+                    result.append(line + " ──┤")
+            else:
+                result.append(line)
+        
+        # Add spacer between predecessors (except last)
+        if i < total_preds - 1 and i != mid_point - 1:
+            # Find max line length for alignment
+            max_len = max(len(l.rstrip()) for l in result) if result else 0
+            result.append(" " * max_len + "   │")
+    
+    return result
+
+
+def _short_type(node_name: str) -> str:
+    """Get shortened type name."""
+    meta = NodeRegistry.get_metadata(node_name)
+    type_map = {
+        "InstrumentNode": "Instr",
+        "PrecomputedUVTrendSignalNode": "Signal",
+        "WeightedSumNode": "WSum",
+        "ScalingNode": "Scale",
+        "CorrAdjustedUVScalingNode": "CorrUV"
+    }
+    return type_map.get(meta["type"], meta["type"])
 
 
 def _print_ancestors(node_name: str, show_types: bool, max_depth: int):
-    """Find and print nodes that have this node as predecessor (successors)."""
+    """Find and print nodes that have this node as predecessor."""
     
-    # Find all nodes that have node_name as predecessor
     successors = []
     for name in NodeRegistry.list_nodes():
         meta = NodeRegistry.get_metadata(name)
@@ -227,14 +189,13 @@ def _print_ancestors(node_name: str, show_types: bool, max_depth: int):
         return
     
     for succ_name in successors:
-        type_str = f" [{NodeRegistry.get_metadata(succ_name)['type']}]" if show_types else ""
+        type_str = f" [{_short_type(succ_name)}]" if show_types else ""
         print(f"→ {succ_name}{type_str}")
         
-        # Recursively find ancestors of this successor
         if max_depth is None or max_depth > 1:
             sub_ancestors = _get_ancestors(succ_name, max_depth - 1 if max_depth else None)
             for anc in sub_ancestors:
-                type_str = f" [{NodeRegistry.get_metadata(anc)['type']}]" if show_types else ""
+                type_str = f" [{_short_type(anc)}]" if show_types else ""
                 print(f"  → {anc}{type_str}")
 
 
@@ -253,15 +214,15 @@ def _get_ancestors(node_name: str, max_depth: int) -> list[str]:
     return ancestors
 
 
-def tree_to_mermaid(node_name: str, direction: str = "down", depth: int = None) -> str:
+def tree_to_mermaid(node_name: str, depth: int = None) -> str:
     """
-    Generate Mermaid diagram code for rendering in notebooks.
+    Generate Mermaid diagram code (left to right flow).
     
     Usage in notebook:
         from IPython.display import display, Markdown
         display(Markdown(f"```mermaid\\n{tree_to_mermaid('node_name')}\\n```"))
     """
-    lines = ["graph TD"]
+    lines = ["graph LR"]  # LR = left to right
     visited = set()
     
     node = NodeRegistry.get(node_name)
@@ -280,14 +241,13 @@ def _build_mermaid(node, lines: list, visited: set, max_depth: int, current_dept
         return
     visited.add(node.name)
     
-    # Sanitize node name for mermaid (replace spaces, special chars)
+    # Sanitize node name for mermaid
     safe_name = node.name.replace(" ", "_").replace("-", "_")
-    node_type = NodeRegistry.get_metadata(node.name)["type"]
-    short_type = node_type.replace("Node", "")
+    short_type = _short_type(node.name)
     
     for pred in node.predecessors:
         safe_pred = pred.name.replace(" ", "_").replace("-", "_")
-        lines.append(f"    {safe_pred}[{pred.name}] --> {safe_name}[{node.name}]")
+        pred_type = _short_type(pred.name)
+        # Arrow from predecessor to node (left to right)
+        lines.append(f"    {safe_pred}[{pred.name}<br/>{pred_type}] --> {safe_name}[{node.name}<br/>{short_type}]")
         _build_mermaid(pred, lines, visited, max_depth, current_depth + 1)
-
-
