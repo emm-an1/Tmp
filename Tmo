@@ -1,17 +1,30 @@
-trend_node = NodeRegistry.get("oil_complex_trend")
 ws_node = NodeRegistry.get("oil_complex_trend_ws")
+mv = ws_node.mv()
 
-# Check pnls going into correlation calc
+print("First 20 rows:")
+print(mv.head(20))
+
+print("\nValue counts for first column around early dates:")
+print(mv.iloc[:50].sum(axis=1).value_counts())
+
+
+fast_node = NodeRegistry.get("oil_complex_fast")
+med_node = NodeRegistry.get("oil_complex_medium")
+slow_node = NodeRegistry.get("oil_complex_slow")
+
+print("Fast mv first date:", fast_node.mv().index[0])
+print("Medium mv first date:", med_node.mv().index[0])
+print("Slow mv first date:", slow_node.mv().index[0])
+
+
 fast_pnl = NodeRegistry.get("oil_complex_fast").pnl()
-med_pnl = NodeRegistry.get("oil_complex_medium").pnl()
 slow_pnl = NodeRegistry.get("oil_complex_slow").pnl()
 
-print("Fast pnl first valid:", fast_pnl.first_valid_index())
-print("Medium pnl first valid:", med_pnl.first_valid_index())
-print("Slow pnl first valid:", slow_pnl.first_valid_index())
+# Combine
+combined = fast_pnl.join(slow_pnl, how="outer")
+combined.columns = ["fast", "slow"]
 
-# Check NaNs
-print("\nNaN counts:")
-print("Fast:", fast_pnl.isna().sum().values[0])
-print("Medium:", med_pnl.isna().sum().values[0])
-print("Slow:", slow_pnl.isna().sum().values[0])
+# Count overlapping non-NaN
+both_valid = combined.dropna()
+print(f"First date both valid: {both_valid.index[0]}")
+print(f"Total overlapping observations: {len(both_valid)}")
