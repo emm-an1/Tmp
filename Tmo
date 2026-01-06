@@ -1,10 +1,23 @@
-import pandas as pd
-import numpy as np
+def __init__(self, name: str, predecessors: list[str], years: float = 5, min_periods: int = None):
+    """
+    Args:
+        name: Node name
+        predecessors: List with single predecessor name (must be WeightedSumNode)
+        years: Rolling window in years (default 5)
+        min_periods: Minimum observations for correlation (default = years * 252)
+    """
+    super().__init__(name=name, predecessors=predecessors, multiplier=None)
+    
+    if not isinstance(self.predecessor, WeightedSumNode):
+        raise ValueError("CorrAdjustedUVScalingNode predecessor must be WeightedSumNode")
+    
+    self._years = years
+    self._window = int(years * 252)
+    self._min_periods = min_periods if min_periods is not None else self._window
+    self._computed_multiplier = None
+    self._rolling_corr = None
 
-# Simulate: mostly NaN, only a few overlapping values
-df = pd.DataFrame({
-    'A': [np.nan]*100 + [1.0, 2.0, 3.0],
-    'B': [np.nan]*100 + [1.0, 2.0, 3.0]
-})
 
-print(df.corr())
+##
+
+corr = window.corr(min_periods=self._min_periods)
