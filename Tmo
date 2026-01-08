@@ -1,63 +1,102 @@
 import numpy as np
-from scipy.stats import t as student_t
 
-def t_bridge_simple_returns(
+def simulate_linear_plus_t_noise_bridge(
     p0: float,
     p1: float,
     n_steps: int,
-    sigma_target: float,
+    target_std_simple: float,
     nu: float,
     seed: int = 123,
-    max_iter: int = 20,
-    tol: float = 1e-8,
+    ddof: int = 1,
+    alpha_max: float = 256.0,
+    max_iter: int = 80,
 ):
     """
-    Robust Student-t bridge whose *simple returns* have sample std ≈ sigma_target
-    and endpoints exactly at p0, p1.
+    Builds a price path P[0..N] such that:
+      - P[0] = p0, P[N] = p1 (exact)
+      - simple returns r_i = P[i]/P[i-1] - 1 have sample std ~= target_std_simple
+      - noise is heavy-tailed (Student-t) and zero-sum in log-gross-returns, so endpoint holds.
+
+    Baseline is linear in log-price (i.e., constant log gross-return), then we add
+    scaled zero-sum t-noise to log gross-returns.
+
+    If target_std_simple is computed from your historical series, compute it on the same frequency.
     """
+    if p0 <= 0 or p1 <= 0:
+        raise ValueError("p0 and p1 must be > 0.")
+    if n_steps < 1:
+        raise ValueError("n_steps must be >= 1.")
+    if nu <= 0:
+        raise ValueError("nu must be > 0.")
+    if target_std_simple < 0:
+        raise ValueError("target_std_simple must be >= 0.")
+
     rng = np.random.default_rng(seed)
-    ratio = p1 / p0
     N = n_steps
 
-    # initial mean return per step that reaches p1/p0 if all equal
-    a = ratio ** (1 / N) - 1.0
-    # sample from Student-t (mean 0, std 1)
-    z = student_t.rvs(df=nu, size=N, random_state=rng)
-    z -= z.mean()
+    # Baseline: constant log gross return so that product hits p1/p0
+    total_log_ratio = np.log(p1 / p0)
+    m = total_log_ratio / N  # baseline per-step log gross return
 
-    # start with scale b giving approximate target std
-    b = sigma_target / np.std(z)
+    # Draw t-noise in log-gross-return space; enforce zero-sum so endpoint stays exact.
+    e = rng.standard_t(df=nu, size=N).astype(float)
+    e -= e.mean()
 
+    # Normalize e to unit sample std (if finite / non-degenerate)
+    e_std = np.std(e, ddof=ddof)
+    if e_std == 0:
+        # Degenerate noise; return baseline
+        X = np.log(p0) + np.linspace(0.0, total_log_ratio, N + 1)
+        P = np.exp(X)
+        r = P[1:] / P[:-1] - 1.0
+        return np.linspace(0.0, 1.0, N + 1), P, {"alpha": 0.0, "achieved_std": float(np.std(r, ddof=ddof))}
+    e /= e_std
+
+    def path_and_std(alpha: float):
+        y = m + alpha * e  # per-step log gross returns; sums to total_log_ratio because sum(e)=0
+        X = np.log(p0) + np.concatenate([[0.0], np.cumsum(y)])
+        P = np.exp(X)
+        r = P[1:] / P[:-1] - 1.0
+        return P, float(np.std(r, ddof=ddof))
+
+    # If target is zero, return baseline
+    if target_std_simple == 0:
+        P, achieved = path_and_std(0.0)
+        return np.linspace(0.0, 1.0, N + 1), P, {"alpha": 0.0, "achieved_std": achieved}
+
+    # Bracket alpha so std(alpha) crosses target
+    lo, hi = 0.0, 1.0
+    _, std_hi = path_and_std(hi)
+
+    while std_hi < target_std_simple and hi < alpha_max:
+        hi *= 2.0
+        _, std_hi = path_and_std(hi)
+
+    # If we can't reach target within alpha_max, return best-effort at alpha_max
+    if std_hi < target_std_simple:
+        P, achieved = path_and_std(hi)
+        return np.linspace(0.0, 1.0, N + 1), P, {
+            "alpha": float(hi),
+            "achieved_std": achieved,
+            "hit_target": False,
+            "note": "Increase alpha_max if you need higher volatility."
+        }
+
+    # Bisection on alpha
     for _ in range(max_iter):
-        r = a + b * z
-        # enforce positivity to avoid numeric blowups
-        if np.any(1 + r <= 0):
-            b *= 0.9
-            continue
+        mid = 0.5 * (lo + hi)
+        _, std_mid = path_and_std(mid)
+        if std_mid < target_std_simple:
+            lo = mid
+        else:
+            hi = mid
 
-        # endpoint product
-        prod_ratio = np.prod(1 + r)
-        err_ratio = ratio / prod_ratio
-        if abs(err_ratio - 1) < tol:
-            break
-        # adjust mean component a multiplicatively
-        a = (1 + a) * err_ratio ** (1 / N) - 1
+    alpha_star = 0.5 * (lo + hi)
+    P, achieved = path_and_std(alpha_star)
 
-        # small rescale of b to keep std near target
-        std_r = np.std(r)
-        if std_r > 0:
-            b *= sigma_target / std_r
-
-    # final path
-    P = np.empty(N + 1)
-    P[0] = p0
-    for i in range(N):
-        P[i + 1] = P[i] * (1 + a + b * z[i])
-
-    achieved_std = np.std(P[1:] / P[:-1] - 1)
-    return np.linspace(0, 1, N + 1), P, {
-        "achieved_std": achieved_std,
-        "a": a,
-        "b": b,
-        "nu": nu
+    return np.linspace(0.0, 1.0, N + 1), P, {
+        "alpha": float(alpha_star),
+        "achieved_std": achieved,
+        "hit_target": True,
+        "nu": float(nu),
     }
