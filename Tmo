@@ -1,23 +1,147 @@
-def __init__(self, name: str, predecessors: list[str], years: float = 5, min_periods: int = None):
+import numpy as np
+
+def simulate_t_bridge_match_simple_return_std(
+    p0: float,
+    p1: float,
+    n_steps: int,
+    sigma_target: float,
+    nu: float,
+    T: float = 1.0,
+    seed: int = 123,
+    ddof: int = 1,
+    max_bisect_iter: int = 80,
+    k_max: float = 256.0,
+):
     """
+    Simulate a *positive* price path P[0..N] that:
+      - starts at P[0] = p0
+      - ends at   P[N] = p1   (exact)
+      - has heavy-tailed 't-like' behavior via an elliptical Student-t bridge in log space
+      - matches the sample std of *simple returns* r_i = P_i/P_{i-1} - 1 to sigma_target (exact, via scaling)
+
+    Notes:
+      - Endpoint pinning forces dependence; returns cannot be iid under the constraint.
+      - sigma_target is the std of simple returns computed on your historical series (same step size).
+
     Args:
-        name: Node name
-        predecessors: List with single predecessor name (must be WeightedSumNode)
-        years: Rolling window in years (default 5)
-        min_periods: Minimum observations for correlation (default = years * 252)
+      p0, p1      : endpoint prices (>0)
+      n_steps     : number of steps N (returns count). Output length is N+1 prices.
+      sigma_target: target std of simple returns over the segment (sample std, ddof as specified)
+      nu          : degrees of freedom (>0). For nu<=2, variance is infinite (still works).
+      T           : total time length (only affects internal scaling; default 1.0)
+      seed        : RNG seed
+      ddof        : degrees of freedom for std (1 matches common sample std)
+      max_bisect_iter, k_max: controls for the scaling root-find
+
+    Returns:
+      times  : (N+1,) array from 0..T
+      prices : (N+1,) array
+      info   : dict with achieved std, scale k, and diagnostics
     """
-    super().__init__(name=name, predecessors=predecessors, multiplier=None)
-    
-    if not isinstance(self.predecessor, WeightedSumNode):
-        raise ValueError("CorrAdjustedUVScalingNode predecessor must be WeightedSumNode")
-    
-    self._years = years
-    self._window = int(years * 252)
-    self._min_periods = min_periods if min_periods is not None else self._window
-    self._computed_multiplier = None
-    self._rolling_corr = None
+    if p0 <= 0 or p1 <= 0:
+        raise ValueError("p0 and p1 must be > 0.")
+    if n_steps < 1:
+        raise ValueError("n_steps must be >= 1.")
+    if nu <= 0:
+        raise ValueError("nu must be > 0.")
+    if sigma_target < 0:
+        raise ValueError("sigma_target must be >= 0.")
 
+    N = n_steps
+    rng = np.random.default_rng(seed)
+    dt = T / N
 
-##
+    X0 = np.log(p0)
+    X1 = np.log(p1)
+    total_log_ratio = X1 - X0
+    m = total_log_ratio / N  # per-step mean log gross return for the endpoint
 
-corr = window.corr(min_periods=self._min_periods)
+    # If target std is zero (or extremely close), return deterministic exponential interpolation
+    if sigma_target == 0:
+        k = np.arange(N + 1)
+        X = X0 + (k / N) * (X1 - X0)
+        P = np.exp(X)
+        r = P[1:] / P[:-1] - 1.0
+        return (
+            np.linspace(0.0, T, N + 1),
+            P,
+            {"k": 0.0, "std_simple_returns": float(np.std(r, ddof=ddof)), "hit_target": True},
+        )
+
+    # ---------- Base "t-like" bridge in log gross-returns ----------
+    # Elliptical multivariate t via scale-mixture: common scale s_mix = sqrt(nu / chi2_nu)
+    g = rng.chisquare(df=nu)
+    s_mix = np.sqrt(nu / g)
+
+    # Raw Gaussian increments in log-space (unit scale); variability will be matched via k later
+    eps = rng.standard_normal(N)
+    u = np.sqrt(dt) * s_mix * eps  # base noise increments (scale 1)
+
+    # Impose sum constraint on log-increments so endpoint matches:
+    # y_i = (u_i - mean(u)) + m
+    y = (u - u.mean()) + m
+    X_raw = X0 + np.concatenate([[0.0], np.cumsum(y)])  # length N+1
+
+    # Baseline straight line in log-space (deterministic endpoint interpolation)
+    k_idx = np.arange(N + 1)
+    L = X0 + (k_idx / N) * total_log_ratio
+
+    # Deviations from baseline (zero at endpoints by construction)
+    D = X_raw - L
+    D[0] = 0.0
+    D[-1] = 0.0
+
+    def std_simple_returns_for_scale(scale_k: float) -> float:
+        Xk = L + scale_k * D
+        Pk = np.exp(Xk)
+        rk = Pk[1:] / Pk[:-1] - 1.0
+        return float(np.std(rk, ddof=ddof))
+
+    # ---------- Find k so std(simple returns) matches sigma_target ----------
+    lo, hi = 0.0, 1.0
+    std_lo = std_simple_returns_for_scale(lo)  # should be ~0
+    std_hi = std_simple_returns_for_scale(hi)
+
+    # Expand hi until we bracket the target or hit k_max
+    while std_hi < sigma_target and hi < k_max:
+        hi *= 2.0
+        std_hi = std_simple_returns_for_scale(hi)
+
+    hit_target = std_hi >= sigma_target
+
+    # If we cannot reach target even at hi=k_max, return best-effort at k=hi
+    if not hit_target:
+        X = L + hi * D
+        P = np.exp(X)
+        r = P[1:] / P[:-1] - 1.0
+        return (
+            np.linspace(0.0, T, N + 1),
+            P,
+            {
+                "k": float(hi),
+                "std_simple_returns": float(np.std(r, ddof=ddof)),
+                "hit_target": False,
+                "note": "Could not reach sigma_target within k_max; returned maximum-variance attempt.",
+            },
+        )
+
+    # Bisection on [lo, hi]
+    for _ in range(max_bisect_iter):
+        mid = 0.5 * (lo + hi)
+        std_mid = std_simple_returns_for_scale(mid)
+        if std_mid < sigma_target:
+            lo = mid
+        else:
+            hi = mid
+
+    k_star = 0.5 * (lo + hi)
+    X = L + k_star * D
+    P = np.exp(X)
+    r = P[1:] / P[:-1] - 1.0
+    achieved = float(np.std(r, ddof=ddof))
+
+    return (
+        np.linspace(0.0, T, N + 1),
+        P,
+        {"k": float(k_star), "std_simple_returns": achieved, "hit_target": True, "nu": float(nu)},
+    )
