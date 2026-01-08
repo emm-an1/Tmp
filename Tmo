@@ -1,45 +1,63 @@
 import numpy as np
+from scipy.stats import t as student_t
 
-def t_bridge_match_std_simple(
-    p0, p1, n_steps, sigma_target, nu, T=1.0, seed=123, ddof=1
+def t_bridge_simple_returns(
+    p0: float,
+    p1: float,
+    n_steps: int,
+    sigma_target: float,
+    nu: float,
+    seed: int = 123,
+    max_iter: int = 20,
+    tol: float = 1e-8,
 ):
     """
-    Student-t style bridge between p0 and p1 whose *simple returns*
-    have sample std ≈ sigma_target (not exploding under exp()).
+    Robust Student-t bridge whose *simple returns* have sample std ≈ sigma_target
+    and endpoints exactly at p0, p1.
     """
     rng = np.random.default_rng(seed)
-    X0, X1 = np.log(p0), np.log(p1)
-    total_lr = X1 - X0
-    m = total_lr / n_steps
+    ratio = p1 / p0
+    N = n_steps
 
-    # Heavy-tailed random shocks (Student-t via scale mixture)
-    g = rng.chisquare(df=nu)
-    s_mix = np.sqrt(nu / g)
-    eps = rng.standard_normal(n_steps)
-    u = s_mix * eps
-    u -= u.mean()               # zero-sum noise
-    # baseline linear bridge in log space
-    base_lr = m + 0.05 * u      # small perturbation
+    # initial mean return per step that reaches p1/p0 if all equal
+    a = ratio ** (1 / N) - 1.0
+    # sample from Student-t (mean 0, std 1)
+    z = student_t.rvs(df=nu, size=N, random_state=rng)
+    z -= z.mean()
 
-    # build baseline prices
-    X = X0 + np.cumsum(np.concatenate([[0], base_lr]))
-    P = np.exp(X)
-    r = P[1:] / P[:-1] - 1.0
-    std0 = np.std(r, ddof=ddof)
-    if std0 == 0:
-        return np.linspace(0, T, n_steps + 1), np.linspace(p0, p1, n_steps + 1), {}
+    # start with scale b giving approximate target std
+    b = sigma_target / np.std(z)
 
-    # rescale *returns*, not log deviations
-    k = sigma_target / std0
-    r_scaled = r * k
-    # renormalize to exact endpoint
-    adj = (p1 / p0) / np.prod(1 + r_scaled)
-    r_scaled[-1] = adj * (1 + r_scaled[-1]) - 1
-    # rebuild prices
-    P2 = np.empty(n_steps + 1)
-    P2[0] = p0
-    for i in range(n_steps):
-        P2[i + 1] = P2[i] * (1 + r_scaled[i])
+    for _ in range(max_iter):
+        r = a + b * z
+        # enforce positivity to avoid numeric blowups
+        if np.any(1 + r <= 0):
+            b *= 0.9
+            continue
 
-    achieved = np.std(P2[1:] / P2[:-1] - 1, ddof=ddof)
-    return np.linspace(0, T, n_steps + 1), P2, {"std_achieved": achieved, "scale_k": k}
+        # endpoint product
+        prod_ratio = np.prod(1 + r)
+        err_ratio = ratio / prod_ratio
+        if abs(err_ratio - 1) < tol:
+            break
+        # adjust mean component a multiplicatively
+        a = (1 + a) * err_ratio ** (1 / N) - 1
+
+        # small rescale of b to keep std near target
+        std_r = np.std(r)
+        if std_r > 0:
+            b *= sigma_target / std_r
+
+    # final path
+    P = np.empty(N + 1)
+    P[0] = p0
+    for i in range(N):
+        P[i + 1] = P[i] * (1 + a + b * z[i])
+
+    achieved_std = np.std(P[1:] / P[:-1] - 1)
+    return np.linspace(0, 1, N + 1), P, {
+        "achieved_std": achieved_std,
+        "a": a,
+        "b": b,
+        "nu": nu
+    }
