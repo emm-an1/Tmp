@@ -1,39 +1,17 @@
 import numpy as np
+from scipy.interpolate import UnivariateSpline
 
-def brownian_bridge(p0, pT, n, sigma=0.01, tol=0.1, max_attempts=1000):
-    """
-    Generate a Brownian bridge from p0 to pT with target volatility.
+def smooth_spline(df, x_col='x', y_col='y'):
+    x = df[x_col].values
+    y = df[y_col].values
     
-    Parameters:
-        p0: starting price
-        pT: ending price  
-        n: number of steps (returns n+1 points)
-        sigma: target per-step return volatility
-        tol: acceptable relative error (0.1 = within 10% of target vol)
-        max_attempts: max paths to try before giving up
+    sort_idx = np.argsort(x)
+    x_sorted = x[sort_idx]
+    y_sorted = y[sort_idx]
     
-    Returns:
-        numpy array of length n+1
-    """
-    if p0 <= 0 or pT <= 0:
-        raise ValueError("Prices must be positive")
+    spline = UnivariateSpline(x_sorted, y_sorted, k=3)  # s=None is default
+    y_smooth = spline(x_sorted)
     
-    t = np.linspace(0, 1, n + 1)
-    
-    for attempt in range(max_attempts):
-        dW = np.random.randn(n)
-        W = np.concatenate([[0], np.cumsum(dW)])
-        bridge = W - t * W[-1]
-        
-        path = p0 + (pT - p0) * t + sigma * p0 * bridge
-        path = np.abs(path)
-        path[0], path[-1] = p0, pT
-        
-        rets = np.diff(path) / path[:-1]
-        realized_vol = rets.std()
-        
-        rel_error = abs(realized_vol - sigma) / sigma
-        if rel_error <= tol:
-            return path
-    
-    raise RuntimeError(f"Could not match target vol within {max_attempts} attempts")
+    result = np.empty_like(y_smooth)
+    result[sort_idx] = y_smooth
+    return result
