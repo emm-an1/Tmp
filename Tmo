@@ -1,20 +1,35 @@
 import numpy as np
-from scipy.interpolate import UnivariateSpline
+from scipy.optimize import curve_fit
 
-def smooth_spline(df, x_col='x', y_col='y'):
+def smooth_sigmoid(df, x_col='x', y_col='y'):
     x = df[x_col].values
     y = df[y_col].values
     
-    sort_idx = np.argsort(x)
-    x_sorted = x[sort_idx]
-    y_sorted = y[sort_idx]
+    # Detect direction
+    slope = np.polyfit(x, y, 1)[0]
+    increasing = slope > 0
     
-    spline = UnivariateSpline(x_sorted, y_sorted, k=3)
-    y_smooth_sorted = spline(x_sorted)
+    def sigmoid(x, a, b, c, d):
+        # a = lower asymptote, d = upper asymptote
+        # b = steepness, c = midpoint
+        return a + (d - a) / (1 + np.exp(-b * (x - c)))
     
-    # Map back to original order
-    y_smooth = np.empty_like(y_smooth_sorted)
-    y_smooth[sort_idx] = y_smooth_sorted
+    # Initial guesses
+    y_min, y_max = y.min(), y.max()
+    x_mid = x.mean()
+    b0 = 1 if increasing else -1
+    p0 = [y_min, b0, x_mid, y_max]
+    
+    # Bounds to enforce direction
+    if increasing:
+        bounds = ([-np.inf, 0, -np.inf, -np.inf], 
+                  [np.inf, np.inf, np.inf, np.inf])
+    else:
+        bounds = ([-np.inf, -np.inf, -np.inf, -np.inf], 
+                  [np.inf, 0, np.inf, np.inf])
+    
+    popt, _ = curve_fit(sigmoid, x, y, p0=p0, bounds=bounds, maxfev=5000)
+    y_smooth = sigmoid(x, *popt)
     
     result = df.copy()
     result[f'{y_col}_smooth'] = y_smooth
