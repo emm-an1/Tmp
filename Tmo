@@ -1,134 +1,45 @@
 import numpy as np
 
-def simulate_price_linear_t_bridge_match_std(
-    p0: float,
-    p1: float,
-    n_steps: int,
-    target_std_simple: float,
-    nu: float,
-    seed: int = 123,
-    ddof: int = 1,
-    max_iter: int = 80,
-    alpha_max: float = 256.0,
-):
+def brownian_bridge(p0, pT, n, sigma=None):
     """
-    Price path P[0..N] such that:
-      - P[0]=p0, P[N]=p1 exactly
-      - baseline is LINEAR in price between endpoints
-      - multiplicative noise factor is positive and endpoint-pinned (bridge)
-      - calibrates noise amplitude alpha so std(simple returns) ~= target_std_simple
-
-    Notes:
-      - If baseline returns std already exceeds target, the target is infeasible (noise can't reduce it).
-      - Student-t variance is finite only if nu>2; we standardize if nu>2.
+    Generate a Brownian bridge path from p0 to pT in n steps.
+    
+    Parameters:
+        p0: starting price
+        pT: ending price
+        n: number of steps (returns n+1 points including endpoints)
+        sigma: volatility scaling (default: auto-scaled based on price movement)
+    
+    Returns:
+        numpy array of length n+1 with path from p0 to pT
     """
-    if p0 <= 0 or p1 <= 0:
-        raise ValueError("p0 and p1 must be > 0.")
-    if n_steps < 1:
-        raise ValueError("n_steps must be >= 1.")
-    if nu <= 0:
-        raise ValueError("nu must be > 0.")
-    if target_std_simple < 0:
-        raise ValueError("target_std_simple must be >= 0.")
-
-    rng = np.random.default_rng(seed)
-    N = n_steps
-
-    # 1) Linear-in-price baseline (exact endpoints)
-    i = np.arange(N + 1)
-    P_base = p0 + (p1 - p0) * (i / N)
-
-    def std_simple(P):
-        r = P[1:] / P[:-1] - 1.0
-        return float(np.std(r, ddof=ddof))
-
-    std0 = std_simple(P_base)
-
-    # If you asked for less vol than baseline already has, impossible.
-    # (Baseline simple returns vary because denominator changes along a linear price path.)
-    if target_std_simple < std0 - 1e-12:
-        return i.astype(float), P_base, {
-            "hit_target": False,
-            "reason": "Infeasible: baseline (linear price path) already has higher std(simple returns) than target.",
-            "baseline_std": std0,
-            "target_std": target_std_simple,
-            "alpha": 0.0,
-        }
-
-    if abs(target_std_simple - std0) <= 1e-12:
-        return i.astype(float), P_base, {
-            "hit_target": True,
-            "baseline_std": std0,
-            "target_std": target_std_simple,
-            "alpha": 0.0,
-        }
-
-    # 2) Build a heavy-tailed BRIDGE in log-multiplier space
-    #    Create iid t shocks, cumulative, then detrend to make endpoints 0.
-    z = rng.standard_t(df=nu, size=N).astype(float)
-
-    # Standardize to unit variance if possible (nu>2). Otherwise scale by sample std.
-    if nu > 2:
-        z /= np.sqrt(nu / (nu - 2))
-    z -= z.mean()
-    z_std = np.std(z, ddof=ddof)
-    if z_std == 0:
-        z_std = 1.0
-    z /= z_std
-
-    # Bridge levels B_k with B_0=B_N=0
-    S = np.concatenate([[0.0], np.cumsum(z)])              # length N+1
-    B = S - (i / N) * S[-1]                                # endpoints pinned
-
-    # Normalize B so alpha has interpretable scale (avoid huge/small B)
-    B_std = np.std(B, ddof=ddof)
-    if B_std == 0:
-        B_std = 1.0
-    B /= B_std
-
-    def path_and_std(alpha: float):
-        # Positive multiplicative factor, endpoints 1 because B endpoints 0
-        mult = np.exp(alpha * B)
-        P = P_base * mult
-        # Re-enforce exact endpoints numerically (usually already exact)
-        P[0] = p0
-        P[-1] = p1
-        return P, std_simple(P)
-
-    # 3) Bisection on alpha (std should increase with alpha in normal cases)
-    lo, hi = 0.0, 1.0
-    _, std_hi = path_and_std(hi)
-    while std_hi < target_std_simple and hi < alpha_max:
-        hi *= 2.0
-        _, std_hi = path_and_std(hi)
-
-    if std_hi < target_std_simple:
-        P, achieved = path_and_std(hi)
-        return i.astype(float), P, {
-            "hit_target": False,
-            "reason": "Could not reach target within alpha_max; increase alpha_max.",
-            "baseline_std": std0,
-            "achieved_std": achieved,
-            "target_std": target_std_simple,
-            "alpha": float(hi),
-        }
-
-    for _ in range(max_iter):
-        mid = 0.5 * (lo + hi)
-        _, std_mid = path_and_std(mid)
-        if std_mid < target_std_simple:
-            lo = mid
-        else:
-            hi = mid
-
-    alpha_star = 0.5 * (lo + hi)
-    P, achieved = path_and_std(alpha_star)
-
-    return i.astype(float), P, {
-        "hit_target": True,
-        "baseline_std": std0,
-        "achieved_std": achieved,
-        "target_std": target_std_simple,
-        "alpha": float(alpha_star),
-        "nu": float(nu),
-    }
+    if p0 <= 0 or pT <= 0:
+        raise ValueError("Start and end prices must be positive")
+    
+    if sigma is None:
+        # Default sigma scaled to price level and path length
+        sigma = 0.1 * min(p0, pT) / np.sqrt(n)
+    
+    # Time grid
+    t = np.linspace(0, 1, n + 1)
+    
+    # Generate standard Brownian motion increments
+    dW = np.random.randn(n) * np.sqrt(1/n)
+    W = np.concatenate([[0], np.cumsum(dW)])
+    
+    # Brownian bridge transformation: B(t) = W(t) - t*W(1)
+    # This gives a process that starts and ends at 0
+    bridge = W - t * W[-1]
+    
+    # Linear interpolation from p0 to pT, plus scaled bridge noise
+    path = p0 + (pT - p0) * t + sigma * np.sqrt(n) * bridge
+    
+    # Enforce positive prices via reflection
+    path = np.abs(path)
+    path[path == 0] = 1e-6  # avoid exact zeros
+    
+    # Force exact endpoints
+    path[0] = p0
+    path[-1] = pT
+    
+    return path
