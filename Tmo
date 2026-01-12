@@ -9,9 +9,13 @@ def smooth_spline(df, x_col='x', y_col='y'):
     x_sorted = x[sort_idx]
     y_sorted = y[sort_idx]
     
-    spline = UnivariateSpline(x_sorted, y_sorted, k=3)  # s=None is default
-    y_smooth = spline(x_sorted)
+    spline = UnivariateSpline(x_sorted, y_sorted, k=3)
+    y_smooth_sorted = spline(x_sorted)
     
-    result = np.empty_like(y_smooth)
-    result[sort_idx] = y_smooth
+    # Map back to original order
+    y_smooth = np.empty_like(y_smooth_sorted)
+    y_smooth[sort_idx] = y_smooth_sorted
+    
+    result = df.copy()
+    result[f'{y_col}_smooth'] = y_smooth
     return result
