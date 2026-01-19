@@ -1,90 +1,194 @@
-# =============================================================================
-# RESIDUAL DIAGNOSTICS (LAST / FULL WINDOW)
-#   Refit the final expanding-window PCA + regression and plot residual diagnostics
-# =============================================================================
-
+import pandas as pd
+import numpy as np
+from sklearn.decomposition import PCA
 import statsmodels.api as sm
-from statsmodels.graphics.gofplots import qqplot
-from statsmodels.tsa.stattools import acf
-
-# ---- Refit using the final date (same logic as your loop, but for the full sample up to last date)
-final_date = dates[-1]
-
-window_data = df.loc[:final_date, PCA_COLUMNS].values
-pca_final = PCA(n_components=N_COMPONENTS)
-scores_final = pca_final.fit_transform(window_data)
-
-# Optional: align sign with your stored last components (if you want consistency with your time series)
-# If you kept prev_components from the loop, you can align:
-try:
-    for j in range(N_COMPONENTS):
-        if np.dot(pca_final.components_[j], prev_components[j]) < 0:
-            pca_final.components_[j] *= -1
-            scores_final[:, j] *= -1
-except NameError:
-    pass
-
-y_final = df.loc[:final_date, Y_COLUMN].values
-X_final = sm.add_constant(scores_final)
-model_final = sm.OLS(y_final, X_final).fit()
-
-fitted = model_final.fittedvalues
-resid = model_final.resid
-
-resid_s = pd.Series(resid, index=df.loc[:final_date].index, name="residual")
-fitted_s = pd.Series(fitted, index=df.loc[:final_date].index, name="fitted")
-
-# ---- Residual summary series (optional)
-std_resid_s = (resid_s - resid_s.mean()) / resid_s.std(ddof=1)
+import matplotlib.pyplot as plt
 
 # =============================================================================
-# PLOT RESIDUALS
+# CONFIGURATION
 # =============================================================================
 
-fig, axes = plt.subplots(2, 3, figsize=(16, 9))
+FREQUENCY = 'weekly'
+MIN_WINDOW_YEARS = 5
 
-# (1) Residual time series
+PCA_COLUMNS = ['Value', 'Momentum', 'Low_Vol', 'Quality']
+N_COMPONENTS = 1
+
+Y_COLUMN = 'returns'
+
+# =============================================================================
+# DERIVED PARAMETERS
+# =============================================================================
+
+OBS_PER_YEAR = {'daily': 252, 'weekly': 52, 'monthly': 12}
+MIN_OBS = MIN_WINDOW_YEARS * OBS_PER_YEAR[FREQUENCY]
+
+# =============================================================================
+# EXPANDING WINDOW PCA + REGRESSION
+# =============================================================================
+
+dates = df.index[MIN_OBS:]
+n_dates = len(dates)
+n_features = len(PCA_COLUMNS)
+n_betas = N_COMPONENTS + 1
+
+# PCA storage
+expl_var = np.full((n_dates, N_COMPONENTS), np.nan)
+eigenvalues = np.full((n_dates, N_COMPONENTS), np.nan)
+loadings = np.full((n_dates, n_features, N_COMPONENTS), np.nan)
+pc_scores_latest = np.full((n_dates, N_COMPONENTS), np.nan)
+
+# Regression storage
+betas = np.full((n_dates, n_betas), np.nan)
+tstats = np.full((n_dates, n_betas), np.nan)
+pvals = np.full((n_dates, n_betas), np.nan)
+rsq = np.full(n_dates, np.nan)
+
+prev_components = None
+
+for i, date in enumerate(dates):
+    window_data = df.loc[:date, PCA_COLUMNS].values
+    
+    pca = PCA(n_components=N_COMPONENTS)
+    scores = pca.fit_transform(window_data)
+    
+    # Sign alignment: match direction of previous iteration
+    if prev_components is not None:
+        for j in range(N_COMPONENTS):
+            if np.dot(pca.components_[j], prev_components[j]) < 0:
+                pca.components_[j] *= -1
+                scores[:, j] *= -1
+    
+    prev_components = pca.components_.copy()
+    
+    expl_var[i] = pca.explained_variance_ratio_
+    eigenvalues[i] = pca.explained_variance_
+    loadings[i] = pca.components_.T
+    pc_scores_latest[i] = scores[-1]
+    
+    # Regression: Y on PC scores
+    y = df.loc[:date, Y_COLUMN].values
+    X = sm.add_constant(scores)
+    
+    model = sm.OLS(y, X).fit()
+    
+    betas[i] = model.params
+    tstats[i] = model.tvalues
+    pvals[i] = model.pvalues
+    rsq[i] = model.rsquared
+
+# Package PCA results
+pc_names = [f'PC{i+1}' for i in range(N_COMPONENTS)]
+
+pca_expl_var = pd.DataFrame(expl_var, index=dates, columns=pc_names)
+pca_eigenvalues = pd.DataFrame(eigenvalues, index=dates, columns=pc_names)
+
+pca_loadings = {
+    f'PC{j+1}': pd.DataFrame(
+        loadings[:, :, j], 
+        index=dates, 
+        columns=PCA_COLUMNS
+    ) for j in range(N_COMPONENTS)
+}
+
+pca_scores = pd.DataFrame(pc_scores_latest, index=dates, columns=pc_names)
+
+# Package regression results
+beta_cols = ['const'] + pc_names
+reg_betas = pd.DataFrame(betas, index=dates, columns=beta_cols)
+reg_tstats = pd.DataFrame(tstats, index=dates, columns=beta_cols)
+reg_pvals = pd.DataFrame(pvals, index=dates, columns=beta_cols)
+reg_rsq = pd.Series(rsq, index=dates, name='R2')
+
+# =============================================================================
+# PLOT PCA RESULTS
+# =============================================================================
+
+n_loading_plots = min(N_COMPONENTS, 2)
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
 ax = axes[0, 0]
-resid_s.plot(ax=ax)
-ax.set_title("Residuals (time series)")
-ax.axhline(0, color="k", alpha=0.3)
+pca_expl_var.plot(ax=ax)
+ax.set_title('Explained Variance Ratio (Expanding Window)')
+ax.set_ylabel('Variance Ratio')
+ax.legend(loc='best')
 
-# (2) Residual vs fitted
 ax = axes[0, 1]
-ax.scatter(fitted_s.values, resid_s.values, s=10, alpha=0.6)
-ax.set_title("Residuals vs Fitted")
-ax.set_xlabel("Fitted")
-ax.set_ylabel("Residual")
-ax.axhline(0, color="k", alpha=0.3)
+pca_eigenvalues.plot(ax=ax)
+ax.set_title('Eigenvalues Over Time')
+ax.set_ylabel('Eigenvalue')
+ax.legend(loc='best')
 
-# (3) Histogram of residuals
-ax = axes[0, 2]
-ax.hist(resid_s.values, bins=40)
-ax.set_title("Residual histogram")
-ax.set_xlabel("Residual")
-
-# (4) Q-Q plot
 ax = axes[1, 0]
-qqplot(resid_s.values, line="45", ax=ax)
-ax.set_title("Q-Q plot (residuals)")
+pca_loadings['PC1'].plot(ax=ax)
+ax.set_title('PC1 Loadings Over Time')
+ax.set_ylabel('Loading')
+ax.legend(loc='best')
 
-# (5) ACF of residuals
 ax = axes[1, 1]
-acf_vals = acf(resid_s.values, nlags=min(40, len(resid_s) - 1), fft=True)
-ax.stem(range(len(acf_vals)), acf_vals, basefmt=" ")
-ax.set_title("ACF of residuals")
-ax.set_xlabel("Lag")
-ax.axhline(0, color="k", alpha=0.3)
-
-# (6) Rolling residual volatility (optional)
-ax = axes[1, 2]
-roll = 52 if FREQUENCY == "weekly" else (252 if FREQUENCY == "daily" else 12)
-resid_s.rolling(roll).std().plot(ax=ax)
-ax.set_title(f"Rolling residual volatility ({roll} obs)")
-ax.set_ylabel("Std(residual)")
+if N_COMPONENTS >= 2:
+    pca_loadings['PC2'].plot(ax=ax)
+    ax.set_title('PC2 Loadings Over Time')
+    ax.set_ylabel('Loading')
+    ax.legend(loc='best')
+else:
+    pca_expl_var.cumsum(axis=1).plot(ax=ax)
+    ax.set_title('Cumulative Explained Variance')
+    ax.set_ylabel('Cumulative Ratio')
+    ax.legend(loc='best')
 
 plt.tight_layout()
 plt.show()
 
-# Optional: print key stats
-print(model_final.summary())
+# =============================================================================
+# PLOT REGRESSION RESULTS
+# =============================================================================
+
+fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+
+ax = axes[0, 0]
+reg_betas.drop(columns='const').plot(ax=ax)
+ax.set_title('Betas on PCs (Expanding Window)')
+ax.set_ylabel('Beta')
+ax.axhline(0, color='k', linestyle='-', alpha=0.3)
+ax.legend(loc='best')
+
+ax = axes[0, 1]
+reg_betas['const'].plot(ax=ax, color='purple')
+ax.set_title('Intercept (Alpha) Over Time')
+ax.set_ylabel('Alpha')
+ax.axhline(0, color='k', linestyle='-', alpha=0.3)
+
+ax = axes[1, 0]
+reg_rsq.plot(ax=ax, color='green')
+ax.set_title('R-squared (Expanding Window)')
+ax.set_ylabel('R²')
+ax.set_ylim(0, 1)
+
+ax = axes[1, 1]
+reg_tstats.drop(columns='const').plot(ax=ax)
+ax.axhline(2, color='k', linestyle='--', alpha=0.5)
+ax.axhline(-2, color='k', linestyle='--', alpha=0.5)
+ax.set_title('T-Statistics Over Time')
+ax.set_ylabel('T-stat')
+ax.legend(loc='best')
+
+ax = axes[2, 0]
+reg_pvals.drop(columns='const').plot(ax=ax)
+ax.axhline(0.05, color='k', linestyle='--', alpha=0.5, label='5%')
+ax.axhline(0.01, color='r', linestyle='--', alpha=0.5, label='1%')
+ax.set_title('P-values Over Time')
+ax.set_ylabel('P-value')
+ax.set_ylim(0, 0.2)
+ax.legend(loc='best')
+
+ax = axes[2, 1]
+reg_pvals['const'].plot(ax=ax, color='purple')
+ax.axhline(0.05, color='k', linestyle='--', alpha=0.5)
+ax.axhline(0.01, color='r', linestyle='--', alpha=0.5)
+ax.set_title('Alpha P-value Over Time')
+ax.set_ylabel('P-value')
+ax.set_ylim(0, 0.2)
+
+plt.tight_layout()
+plt.show()
