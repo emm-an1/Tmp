@@ -1,36 +1,232 @@
+import pandas as pd
 import numpy as np
-from scipy.optimize import curve_fit
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+import statsmodels.api as sm
 
-def smooth_sigmoid(df, x_col='x', y_col='y'):
-    x = df[x_col].values
-    y = df[y_col].values
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+# Data frequency: 'daily', 'weekly', or 'monthly'
+FREQUENCY = 'weekly'
+
+# Minimum window in years
+MIN_WINDOW_YEARS = 5
+
+# PCA settings
+PCA_COLUMNS = ['factor1', 'factor2', 'factor3', 'factor4']  # columns to include
+N_COMPONENTS = 3
+
+# Regression settings
+Y_COLUMN = 'returns'
+X_COLUMNS = ['factor1', 'factor2', 'factor3']
+
+# =============================================================================
+# DERIVED PARAMETERS
+# =============================================================================
+
+OBS_PER_YEAR = {'daily': 252, 'weekly': 52, 'monthly': 12}
+MIN_OBS = MIN_WINDOW_YEARS * OBS_PER_YEAR[FREQUENCY]
+
+# =============================================================================
+# EXPANDING WINDOW PCA
+# =============================================================================
+
+def run_expanding_pca(df, columns, n_components, min_obs):
+    """
+    Expanding window PCA tracking:
+    - Explained variance ratios
+    - Factor loadings (eigenvectors)
+    - PC scores (returns)
+    """
+    dates = df.index[min_obs:]
+    n_dates = len(dates)
+    n_features = len(columns)
     
-    # Detect direction
-    slope = np.polyfit(x, y, 1)[0]
-    increasing = slope > 0
+    # Storage
+    expl_var = np.full((n_dates, n_components), np.nan)
+    loadings = np.full((n_dates, n_features, n_components), np.nan)
+    pc_scores = np.full((n_dates, n_components), np.nan)
     
-    def sigmoid(x, a, b, c, d):
-        # a = lower asymptote, d = upper asymptote
-        # b = steepness, c = midpoint
-        return a + (d - a) / (1 + np.exp(-b * (x - c)))
+    for i, date in enumerate(dates):
+        idx = df.index.get_loc(date)
+        window_data = df.loc[:date, columns].values
+        
+        # Standardize
+        scaler = StandardScaler()
+        scaled = scaler.fit_transform(window_data)
+        
+        # Fit PCA
+        pca = PCA(n_components=n_components)
+        scores = pca.fit_transform(scaled)
+        
+        # Store results
+        expl_var[i] = pca.explained_variance_ratio_
+        loadings[i] = pca.components_.T  # (n_features, n_components)
+        pc_scores[i] = scores[-1]  # latest observation's scores
     
-    # Initial guesses
-    y_min, y_max = y.min(), y.max()
-    x_mid = x.mean()
-    b0 = 1 if increasing else -1
-    p0 = [y_min, b0, x_mid, y_max]
+    # Package results
+    results = {
+        'explained_variance': pd.DataFrame(
+            expl_var, 
+            index=dates, 
+            columns=[f'PC{i+1}' for i in range(n_components)]
+        ),
+        'loadings': {
+            f'PC{j+1}': pd.DataFrame(
+                loadings[:, :, j], 
+                index=dates, 
+                columns=columns
+            ) for j in range(n_components)
+        },
+        'scores': pd.DataFrame(
+            pc_scores, 
+            index=dates, 
+            columns=[f'PC{i+1}' for i in range(n_components)]
+        )
+    }
     
-    # Bounds to enforce direction
-    if increasing:
-        bounds = ([-np.inf, 0, -np.inf, -np.inf], 
-                  [np.inf, np.inf, np.inf, np.inf])
-    else:
-        bounds = ([-np.inf, -np.inf, -np.inf, -np.inf], 
-                  [np.inf, 0, np.inf, np.inf])
+    return results
+
+
+# =============================================================================
+# EXPANDING WINDOW REGRESSION
+# =============================================================================
+
+def run_expanding_regression(df, y_col, x_cols, min_obs):
+    """
+    Expanding window OLS regression tracking:
+    - Betas
+    - R-squared
+    - T-statistics
+    """
+    dates = df.index[min_obs:]
+    n_dates = len(dates)
+    n_betas = len(x_cols) + 1  # +1 for intercept
     
-    popt, _ = curve_fit(sigmoid, x, y, p0=p0, bounds=bounds, maxfev=5000)
-    y_smooth = sigmoid(x, *popt)
+    # Storage
+    betas = np.full((n_dates, n_betas), np.nan)
+    tstats = np.full((n_dates, n_betas), np.nan)
+    rsq = np.full(n_dates, np.nan)
     
-    result = df.copy()
-    result[f'{y_col}_smooth'] = y_smooth
-    return result
+    for i, date in enumerate(dates):
+        y = df.loc[:date, y_col].values
+        X = sm.add_constant(df.loc[:date, x_cols].values)
+        
+        model = sm.OLS(y, X).fit()
+        
+        betas[i] = model.params
+        tstats[i] = model.tvalues
+        rsq[i] = model.rsquared
+    
+    beta_cols = ['const'] + x_cols
+    
+    results = {
+        'betas': pd.DataFrame(betas, index=dates, columns=beta_cols),
+        'tstats': pd.DataFrame(tstats, index=dates, columns=beta_cols),
+        'rsquared': pd.Series(rsq, index=dates, name='R2')
+    }
+    
+    return results
+
+
+# =============================================================================
+# RUN ANALYSIS
+# =============================================================================
+
+# Assuming df is your DataFrame with DatetimeIndex
+
+# pca_results = run_expanding_pca(df, PCA_COLUMNS, N_COMPONENTS, MIN_OBS)
+# reg_results = run_expanding_regression(df, Y_COLUMN, X_COLUMNS, MIN_OBS)
+
+
+# =============================================================================
+# PLOTTING
+# =============================================================================
+
+def plot_pca_results(pca_results, figsize=(14, 10)):
+    import matplotlib.pyplot as plt
+    
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    
+    # Explained variance over time
+    ax = axes[0, 0]
+    pca_results['explained_variance'].plot(ax=ax)
+    ax.set_title('Explained Variance Ratio (Expanding Window)')
+    ax.set_ylabel('Variance Ratio')
+    ax.legend(loc='best')
+    
+    # Cumulative explained variance
+    ax = axes[0, 1]
+    pca_results['explained_variance'].cumsum(axis=1).plot(ax=ax)
+    ax.set_title('Cumulative Explained Variance')
+    ax.set_ylabel('Cumulative Ratio')
+    ax.axhline(0.9, color='k', linestyle='--', alpha=0.5, label='90%')
+    ax.legend(loc='best')
+    
+    # PC1 loadings over time
+    ax = axes[1, 0]
+    pca_results['loadings']['PC1'].plot(ax=ax)
+    ax.set_title('PC1 Loadings Over Time')
+    ax.set_ylabel('Loading')
+    ax.legend(loc='best')
+    
+    # PC2 loadings over time
+    ax = axes[1, 1]
+    pca_results['loadings']['PC2'].plot(ax=ax)
+    ax.set_title('PC2 Loadings Over Time')
+    ax.set_ylabel('Loading')
+    ax.legend(loc='best')
+    
+    plt.tight_layout()
+    return fig
+
+
+def plot_regression_results(reg_results, figsize=(14, 10)):
+    import matplotlib.pyplot as plt
+    
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    
+    # Betas over time
+    ax = axes[0, 0]
+    reg_results['betas'].drop(columns='const').plot(ax=ax)
+    ax.set_title('Betas (Expanding Window)')
+    ax.set_ylabel('Beta')
+    ax.axhline(0, color='k', linestyle='-', alpha=0.3)
+    ax.legend(loc='best')
+    
+    # Intercept over time
+    ax = axes[0, 1]
+    reg_results['betas']['const'].plot(ax=ax, color='purple')
+    ax.set_title('Intercept (Alpha) Over Time')
+    ax.set_ylabel('Alpha')
+    ax.axhline(0, color='k', linestyle='-', alpha=0.3)
+    
+    # R-squared over time
+    ax = axes[1, 0]
+    reg_results['rsquared'].plot(ax=ax, color='green')
+    ax.set_title('R-squared (Expanding Window)')
+    ax.set_ylabel('R²')
+    ax.set_ylim(0, 1)
+    
+    # T-stats over time
+    ax = axes[1, 1]
+    reg_results['tstats'].drop(columns='const').plot(ax=ax)
+    ax.axhline(2, color='k', linestyle='--', alpha=0.5)
+    ax.axhline(-2, color='k', linestyle='--', alpha=0.5)
+    ax.set_title('T-Statistics Over Time')
+    ax.set_ylabel('T-stat')
+    ax.legend(loc='best')
+    
+    plt.tight_layout()
+    return fig
+
+
+# =============================================================================
+# USAGE
+# =============================================================================
+
+# fig_pca = plot_pca_results(pca_results)
+# fig_reg = plot_regression_results(reg_results)
+# plt.show()
