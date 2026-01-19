@@ -21,7 +21,7 @@ N_COMPONENTS = 3
 
 # Regression settings
 Y_COLUMN = 'returns'
-X_COLUMNS = ['factor1', 'factor2', 'factor3']
+# X is now the PC scores (determined by N_COMPONENTS)
 
 # =============================================================================
 # DERIVED PARAMETERS
@@ -31,66 +31,41 @@ OBS_PER_YEAR = {'daily': 252, 'weekly': 52, 'monthly': 12}
 MIN_OBS = MIN_WINDOW_YEARS * OBS_PER_YEAR[FREQUENCY]
 
 # =============================================================================
-# EXPANDING WINDOW PCA
+# EXPANDING WINDOW PCA + REGRESSION
 # =============================================================================
 
-dates_pca = df.index[MIN_OBS:]
-n_dates_pca = len(dates_pca)
+dates = df.index[MIN_OBS:]
+n_dates = len(dates)
 n_features = len(PCA_COLUMNS)
+n_betas = N_COMPONENTS + 1  # PCs + intercept
 
-expl_var = np.full((n_dates_pca, N_COMPONENTS), np.nan)
-loadings = np.full((n_dates_pca, n_features, N_COMPONENTS), np.nan)
-pc_scores = np.full((n_dates_pca, N_COMPONENTS), np.nan)
+# PCA storage
+expl_var = np.full((n_dates, N_COMPONENTS), np.nan)
+loadings = np.full((n_dates, n_features, N_COMPONENTS), np.nan)
+pc_scores_latest = np.full((n_dates, N_COMPONENTS), np.nan)
 
-for i, date in enumerate(dates_pca):
+# Regression storage
+betas = np.full((n_dates, n_betas), np.nan)
+tstats = np.full((n_dates, n_betas), np.nan)
+rsq = np.full(n_dates, np.nan)
+
+for i, date in enumerate(dates):
+    # PCA on expanding window
     window_data = df.loc[:date, PCA_COLUMNS].values
     
     scaler = StandardScaler()
     scaled = scaler.fit_transform(window_data)
     
     pca = PCA(n_components=N_COMPONENTS)
-    scores = pca.fit_transform(scaled)
+    scores = pca.fit_transform(scaled)  # full history of scores for this window
     
     expl_var[i] = pca.explained_variance_ratio_
     loadings[i] = pca.components_.T
-    pc_scores[i] = scores[-1]
-
-# Package PCA results
-pca_expl_var = pd.DataFrame(
-    expl_var, 
-    index=dates_pca, 
-    columns=[f'PC{i+1}' for i in range(N_COMPONENTS)]
-)
-
-pca_loadings = {
-    f'PC{j+1}': pd.DataFrame(
-        loadings[:, :, j], 
-        index=dates_pca, 
-        columns=PCA_COLUMNS
-    ) for j in range(N_COMPONENTS)
-}
-
-pca_scores = pd.DataFrame(
-    pc_scores, 
-    index=dates_pca, 
-    columns=[f'PC{i+1}' for i in range(N_COMPONENTS)]
-)
-
-# =============================================================================
-# EXPANDING WINDOW REGRESSION
-# =============================================================================
-
-dates_reg = df.index[MIN_OBS:]
-n_dates_reg = len(dates_reg)
-n_betas = len(X_COLUMNS) + 1
-
-betas = np.full((n_dates_reg, n_betas), np.nan)
-tstats = np.full((n_dates_reg, n_betas), np.nan)
-rsq = np.full(n_dates_reg, np.nan)
-
-for i, date in enumerate(dates_reg):
+    pc_scores_latest[i] = scores[-1]
+    
+    # Regression: Y on PC scores (from same expanding window)
     y = df.loc[:date, Y_COLUMN].values
-    X = sm.add_constant(df.loc[:date, X_COLUMNS].values)
+    X = sm.add_constant(scores)
     
     model = sm.OLS(y, X).fit()
     
@@ -98,11 +73,32 @@ for i, date in enumerate(dates_reg):
     tstats[i] = model.tvalues
     rsq[i] = model.rsquared
 
-beta_cols = ['const'] + X_COLUMNS
+# Package PCA results
+pca_expl_var = pd.DataFrame(
+    expl_var, 
+    index=dates, 
+    columns=[f'PC{i+1}' for i in range(N_COMPONENTS)]
+)
 
-reg_betas = pd.DataFrame(betas, index=dates_reg, columns=beta_cols)
-reg_tstats = pd.DataFrame(tstats, index=dates_reg, columns=beta_cols)
-reg_rsq = pd.Series(rsq, index=dates_reg, name='R2')
+pca_loadings = {
+    f'PC{j+1}': pd.DataFrame(
+        loadings[:, :, j], 
+        index=dates, 
+        columns=PCA_COLUMNS
+    ) for j in range(N_COMPONENTS)
+}
+
+pca_scores = pd.DataFrame(
+    pc_scores_latest, 
+    index=dates, 
+    columns=[f'PC{i+1}' for i in range(N_COMPONENTS)]
+)
+
+# Package regression results
+beta_cols = ['const'] + [f'PC{i+1}' for i in range(N_COMPONENTS)]
+reg_betas = pd.DataFrame(betas, index=dates, columns=beta_cols)
+reg_tstats = pd.DataFrame(tstats, index=dates, columns=beta_cols)
+reg_rsq = pd.Series(rsq, index=dates, name='R2')
 
 # =============================================================================
 # PLOT PCA RESULTS
@@ -146,7 +142,7 @@ fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
 ax = axes[0, 0]
 reg_betas.drop(columns='const').plot(ax=ax)
-ax.set_title('Betas (Expanding Window)')
+ax.set_title('Betas on PCs (Expanding Window)')
 ax.set_ylabel('Beta')
 ax.axhline(0, color='k', linestyle='-', alpha=0.3)
 ax.legend(loc='best')
@@ -173,4 +169,3 @@ ax.legend(loc='best')
 
 plt.tight_layout()
 plt.show()
-
