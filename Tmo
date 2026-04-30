@@ -1,194 +1,231 @@
-import pandas as pd
+"""
+Historical Analogue Finder
+==========================
+Finds historical periods in a time series most similar to a query window,
+using Euclidean distance on (optionally normalized) windows.
+
+Designed to be domain-agnostic: works on stock returns, inflation prints,
+yields, FX, anything you can put into a pandas Series with a DatetimeIndex.
+
+Methodology notes
+-----------------
+- Plain Euclidean distance on raw values is sensitive to absolute level and
+  scale. We z-score each window by default so the metric compares *shape*.
+- For best results, feed STATIONARY series (returns, diffs, YoY changes),
+  not raw prices/levels. Otherwise trend dominates distance.
+- Top-N matches are de-overlapped greedily: once a window is selected, any
+  candidate that overlaps it is skipped. This avoids the trivial "10 nearly
+  identical adjacent windows" failure mode.
+- Euclidean assumes points are aligned in phase. If you suspect time-warping
+  matters (e.g., recessions of different durations), consider DTW via
+  `dtaidistance` or `tslearn` as a drop-in replacement for the distance step.
+
+Author: built for an analogue-finder project
+"""
+
+from __future__ import annotations
+
 import numpy as np
-from sklearn.decomposition import PCA
-import statsmodels.api as sm
-import matplotlib.pyplot as plt
+import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
+from typing import Literal, Optional, Tuple, Union
 
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
 
-FREQUENCY = 'weekly'
-MIN_WINDOW_YEARS = 5
+NormMethod = Literal["zscore", "demean", "none"]
 
-PCA_COLUMNS = ['Value', 'Momentum', 'Low_Vol', 'Quality']
-N_COMPONENTS = 1
 
-Y_COLUMN = 'returns'
+class HistoricalAnalogueFinder:
+    """
+    Find historical periods most similar to a query window.
 
-# =============================================================================
-# DERIVED PARAMETERS
-# =============================================================================
+    Parameters
+    ----------
+    series : pd.Series
+        Time series of the statistic of interest (e.g. daily returns,
+        monthly CPI YoY). Must have a DatetimeIndex. NaNs are dropped.
+    normalize : {"zscore", "demean", "none"}, default "zscore"
+        Per-window normalization applied before distance:
+          - "zscore": (x - mean) / std        -> compares shape only
+          - "demean": (x - mean)              -> compares level-adjusted shape
+          - "none":  raw values               -> compares absolute trajectory
+    """
 
-OBS_PER_YEAR = {'daily': 252, 'weekly': 52, 'monthly': 12}
-MIN_OBS = MIN_WINDOW_YEARS * OBS_PER_YEAR[FREQUENCY]
+    def __init__(self, series: pd.Series, normalize: NormMethod = "zscore"):
+        if not isinstance(series, pd.Series):
+            raise TypeError("series must be a pandas Series")
+        if not isinstance(series.index, pd.DatetimeIndex):
+            raise TypeError("series must have a DatetimeIndex")
+        if normalize not in ("zscore", "demean", "none"):
+            raise ValueError(f"normalize must be zscore/demean/none, got {normalize!r}")
 
-# =============================================================================
-# EXPANDING WINDOW PCA + REGRESSION
-# =============================================================================
+        self.series = series.dropna().sort_index().astype(float)
+        self.normalize = normalize
 
-dates = df.index[MIN_OBS:]
-n_dates = len(dates)
-n_features = len(PCA_COLUMNS)
-n_betas = N_COMPONENTS + 1
+    # ---------- internal helpers ----------
 
-# PCA storage
-expl_var = np.full((n_dates, N_COMPONENTS), np.nan)
-eigenvalues = np.full((n_dates, N_COMPONENTS), np.nan)
-loadings = np.full((n_dates, n_features, N_COMPONENTS), np.nan)
-pc_scores_latest = np.full((n_dates, N_COMPONENTS), np.nan)
+    @staticmethod
+    def _normalize_matrix(W: np.ndarray, method: NormMethod) -> np.ndarray:
+        """Normalize each row of W independently."""
+        if method == "none":
+            return W
+        means = W.mean(axis=1, keepdims=True)
+        if method == "demean":
+            return W - means
+        # zscore
+        stds = W.std(axis=1, keepdims=True)
+        stds = np.where(stds == 0, 1.0, stds)  # avoid div-by-zero on flat windows
+        return (W - means) / stds
 
-# Regression storage
-betas = np.full((n_dates, n_betas), np.nan)
-tstats = np.full((n_dates, n_betas), np.nan)
-pvals = np.full((n_dates, n_betas), np.nan)
-rsq = np.full(n_dates, np.nan)
+    def _resolve_query(
+        self, query: Union[pd.Series, np.ndarray, Tuple]
+    ) -> Tuple[np.ndarray, Optional[Tuple[pd.Timestamp, pd.Timestamp]]]:
+        """Return (1d float array, optional (start,end) tuple if query came from this series)."""
+        if isinstance(query, tuple) and len(query) == 2:
+            sub = self.series.loc[query[0]:query[1]]
+            if len(sub) < 2:
+                raise ValueError("Query date range yielded fewer than 2 points")
+            return sub.values.astype(float), (sub.index[0], sub.index[-1])
+        if isinstance(query, pd.Series):
+            arr = query.values.astype(float)
+            span = (query.index[0], query.index[-1]) if isinstance(query.index, pd.DatetimeIndex) else None
+            return arr, span
+        arr = np.asarray(query, dtype=float).ravel()
+        return arr, None
 
-prev_components = None
+    # ---------- public API ----------
 
-for i, date in enumerate(dates):
-    window_data = df.loc[:date, PCA_COLUMNS].values
-    
-    pca = PCA(n_components=N_COMPONENTS)
-    scores = pca.fit_transform(window_data)
-    
-    # Sign alignment: match direction of previous iteration
-    if prev_components is not None:
-        for j in range(N_COMPONENTS):
-            if np.dot(pca.components_[j], prev_components[j]) < 0:
-                pca.components_[j] *= -1
-                scores[:, j] *= -1
-    
-    prev_components = pca.components_.copy()
-    
-    expl_var[i] = pca.explained_variance_ratio_
-    eigenvalues[i] = pca.explained_variance_
-    loadings[i] = pca.components_.T
-    pc_scores_latest[i] = scores[-1]
-    
-    # Regression: Y on PC scores
-    y = df.loc[:date, Y_COLUMN].values
-    X = sm.add_constant(scores)
-    
-    model = sm.OLS(y, X).fit()
-    
-    betas[i] = model.params
-    tstats[i] = model.tvalues
-    pvals[i] = model.pvalues
-    rsq[i] = model.rsquared
+    def find_analogues(
+        self,
+        query: Union[pd.Series, np.ndarray, Tuple],
+        top_n: int = 10,
+        exclude_overlap: bool = True,
+        exclude_dates: Optional[Tuple] = None,
+        auto_exclude_query: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Parameters
+        ----------
+        query : pd.Series | np.ndarray | (start, end) tuple of dates
+            The window to match against history. If a tuple, it's interpreted
+            as a date range to slice from `self.series`.
+        top_n : int
+            Maximum number of analogues to return.
+        exclude_overlap : bool
+            If True, returned windows do not overlap each other.
+        exclude_dates : (start, end) or None
+            Manually exclude this date range from the search (e.g., a known
+            reference period you don't want to match against).
+        auto_exclude_query : bool
+            If the query came from the series itself (date tuple or a Series
+            whose index lies inside `self.series`), automatically exclude
+            that span. Prevents the trivial self-match.
 
-# Package PCA results
-pc_names = [f'PC{i+1}' for i in range(N_COMPONENTS)]
+        Returns
+        -------
+        pd.DataFrame with columns:
+            start_date, end_date, distance, similarity
+        sorted by distance ascending (best match first).
+        """
+        q, q_span = self._resolve_query(query)
+        w = len(q)
+        if w < 2:
+            raise ValueError("Query window must contain at least 2 points")
 
-pca_expl_var = pd.DataFrame(expl_var, index=dates, columns=pc_names)
-pca_eigenvalues = pd.DataFrame(eigenvalues, index=dates, columns=pc_names)
+        values = self.series.values
+        dates = self.series.index
+        n = len(values)
+        if w > n:
+            raise ValueError(f"Query length ({w}) > history length ({n})")
 
-pca_loadings = {
-    f'PC{j+1}': pd.DataFrame(
-        loadings[:, :, j], 
-        index=dates, 
-        columns=PCA_COLUMNS
-    ) for j in range(N_COMPONENTS)
-}
+        # Build all sliding windows: shape (n - w + 1, w)
+        windows = sliding_window_view(values, w)
+        norm_windows = self._normalize_matrix(windows, self.normalize)
+        q_norm = self._normalize_matrix(q.reshape(1, -1), self.normalize).ravel()
 
-pca_scores = pd.DataFrame(pc_scores_latest, index=dates, columns=pc_names)
+        # Vectorized Euclidean distance
+        diffs = norm_windows - q_norm
+        distances = np.sqrt((diffs ** 2).sum(axis=1))
 
-# Package regression results
-beta_cols = ['const'] + pc_names
-reg_betas = pd.DataFrame(betas, index=dates, columns=beta_cols)
-reg_tstats = pd.DataFrame(tstats, index=dates, columns=beta_cols)
-reg_pvals = pd.DataFrame(pvals, index=dates, columns=beta_cols)
-reg_rsq = pd.Series(rsq, index=dates, name='R2')
+        starts = dates[: n - w + 1]
+        ends = dates[w - 1 :]
 
-# =============================================================================
-# PLOT PCA RESULTS
-# =============================================================================
+        df = pd.DataFrame(
+            {
+                "start_date": starts,
+                "end_date": ends,
+                "distance": distances,
+            }
+        )
 
-n_loading_plots = min(N_COMPONENTS, 2)
-fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        # Exclude date ranges
+        excludes = []
+        if exclude_dates is not None:
+            excludes.append((pd.Timestamp(exclude_dates[0]), pd.Timestamp(exclude_dates[1])))
+        if auto_exclude_query and q_span is not None:
+            excludes.append((pd.Timestamp(q_span[0]), pd.Timestamp(q_span[1])))
 
-ax = axes[0, 0]
-pca_expl_var.plot(ax=ax)
-ax.set_title('Explained Variance Ratio (Expanding Window)')
-ax.set_ylabel('Variance Ratio')
-ax.legend(loc='best')
+        for ex_start, ex_end in excludes:
+            mask = ~((df["end_date"] >= ex_start) & (df["start_date"] <= ex_end))
+            df = df[mask]
 
-ax = axes[0, 1]
-pca_eigenvalues.plot(ax=ax)
-ax.set_title('Eigenvalues Over Time')
-ax.set_ylabel('Eigenvalue')
-ax.legend(loc='best')
+        df = df.sort_values("distance", kind="mergesort").reset_index(drop=True)
 
-ax = axes[1, 0]
-pca_loadings['PC1'].plot(ax=ax)
-ax.set_title('PC1 Loadings Over Time')
-ax.set_ylabel('Loading')
-ax.legend(loc='best')
+        # Greedy non-overlap selection
+        if exclude_overlap:
+            kept = []
+            kept_ranges: list[Tuple[pd.Timestamp, pd.Timestamp]] = []
+            for row in df.itertuples(index=False):
+                overlap = any(
+                    not (row.end_date < s or row.start_date > e)
+                    for s, e in kept_ranges
+                )
+                if overlap:
+                    continue
+                kept.append(row)
+                kept_ranges.append((row.start_date, row.end_date))
+                if len(kept) >= top_n:
+                    break
+            df = pd.DataFrame(kept)
+        else:
+            df = df.head(top_n).copy()
 
-ax = axes[1, 1]
-if N_COMPONENTS >= 2:
-    pca_loadings['PC2'].plot(ax=ax)
-    ax.set_title('PC2 Loadings Over Time')
-    ax.set_ylabel('Loading')
-    ax.legend(loc='best')
-else:
-    pca_expl_var.cumsum(axis=1).plot(ax=ax)
-    ax.set_title('Cumulative Explained Variance')
-    ax.set_ylabel('Cumulative Ratio')
-    ax.legend(loc='best')
+        # Similarity score: bounded (0,1], higher = more similar.
+        # 1 / (1 + distance) is monotonic, scale-free, easy to read.
+        df["similarity"] = 1.0 / (1.0 + df["distance"].to_numpy())
+        return df.reset_index(drop=True)
 
-plt.tight_layout()
-plt.show()
+    def get_window_values(
+        self, start: pd.Timestamp, end: pd.Timestamp
+    ) -> pd.Series:
+        """Convenience: pull the actual values for a returned analogue window."""
+        return self.series.loc[start:end]
 
-# =============================================================================
-# PLOT REGRESSION RESULTS
-# =============================================================================
 
-fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+# ----------------------------------------------------------------------
+# Demo
+# ----------------------------------------------------------------------
+if __name__ == "__main__":
+    # Synthetic "daily returns" series so the demo is self-contained.
+    rng = np.random.default_rng(42)
+    dates = pd.date_range("1990-01-01", "2025-12-31", freq="B")
+    rets = pd.Series(rng.normal(0.0004, 0.011, len(dates)), index=dates, name="ret")
 
-ax = axes[0, 0]
-reg_betas.drop(columns='const').plot(ax=ax)
-ax.set_title('Betas on PCs (Expanding Window)')
-ax.set_ylabel('Beta')
-ax.axhline(0, color='k', linestyle='-', alpha=0.3)
-ax.legend(loc='best')
+    finder = HistoricalAnalogueFinder(rets, normalize="zscore")
 
-ax = axes[0, 1]
-reg_betas['const'].plot(ax=ax, color='purple')
-ax.set_title('Intercept (Alpha) Over Time')
-ax.set_ylabel('Alpha')
-ax.axhline(0, color='k', linestyle='-', alpha=0.3)
+    # Use the most recent 20 trading days as the query
+    query = rets.iloc[-20:]
 
-ax = axes[1, 0]
-reg_rsq.plot(ax=ax, color='green')
-ax.set_title('R-squared (Expanding Window)')
-ax.set_ylabel('R²')
-ax.set_ylim(0, 1)
+    matches = finder.find_analogues(
+        query=query,
+        top_n=10,
+        exclude_overlap=True,
+        auto_exclude_query=True,
+    )
 
-ax = axes[1, 1]
-reg_tstats.drop(columns='const').plot(ax=ax)
-ax.axhline(2, color='k', linestyle='--', alpha=0.5)
-ax.axhline(-2, color='k', linestyle='--', alpha=0.5)
-ax.set_title('T-Statistics Over Time')
-ax.set_ylabel('T-stat')
-ax.legend(loc='best')
+    print("Top historical analogues for last 20 days:")
+    print(matches.to_string(index=False))
 
-ax = axes[2, 0]
-reg_pvals.drop(columns='const').plot(ax=ax)
-ax.axhline(0.05, color='k', linestyle='--', alpha=0.5, label='5%')
-ax.axhline(0.01, color='r', linestyle='--', alpha=0.5, label='1%')
-ax.set_title('P-values Over Time')
-ax.set_ylabel('P-value')
-ax.set_ylim(0, 0.2)
-ax.legend(loc='best')
-
-ax = axes[2, 1]
-reg_pvals['const'].plot(ax=ax, color='purple')
-ax.axhline(0.05, color='k', linestyle='--', alpha=0.5)
-ax.axhline(0.01, color='r', linestyle='--', alpha=0.5)
-ax.set_title('Alpha P-value Over Time')
-ax.set_ylabel('P-value')
-ax.set_ylim(0, 0.2)
-
-plt.tight_layout()
-plt.show()
+    # Inspect the best-matching historical window
+    best = matches.iloc[0]
+    print(f"\nBest match values ({best.start_date.date()} -> {best.end_date.date()}):")
+    print(finder.get_window_values(best.start_date, best.end_date).to_string())
