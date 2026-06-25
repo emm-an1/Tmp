@@ -1,1 +1,4 @@
 =(COUNTIF(A:A,"<="&(175-ABS(D1-175)))+COUNTIF(A:A,">="&(175+ABS(D1-175))))/COUNT(A:A)
+B1 (left tail):   =COUNTIF(A:A,"<="&(E5/2-ABS(E6-E5/2)))
+B2 (right tail):  =COUNTIF(A:A,">="&(E5/2+ABS(E6-E5/2)))
+B3 (p-value):     =(B1+B2)/COUNT(A:A)
