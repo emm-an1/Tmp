@@ -2,3 +2,197 @@
 B1 (left tail):   =COUNTIF(A:A,"<="&(E5/2-ABS(E6-E5/2)))
 B2 (right tail):  =COUNTIF(A:A,">="&(E5/2+ABS(E6-E5/2)))
 B3 (p-value):     =(B1+B2)/COUNT(A:A)
+
+
+#!/usr/bin/env python3
+"""
+Efficient Frontier (Mean–Variance Optimization)
+
+Input: expected return (ret) and volatility (vol) for each asset, plus correlations.
+Output: plot(s) of the efficient frontier and individual assets.
+"""
+
+import numpy as np
+import pandas as pd
+from scipy.optimize import minimize
+import matplotlib.pyplot as plt
+from matplotlib.ticker import PercentFormatter
+
+np.set_printoptions(precision=4, suppress=True)
+
+# ============================================================================
+# 1. ASSET INPUTS — EDIT ME
+# ============================================================================
+assets = {
+    "US Equities":   {"ret": 0.08, "vol": 0.16},
+    "Intl Equities": {"ret": 0.07, "vol": 0.18},
+    "Bonds":         {"ret": 0.03, "vol": 0.05},
+    "Gold":          {"ret": 0.04, "vol": 0.15},
+}
+
+rf = 0.01  # Risk-free rate (used for max-Sharpe)
+allow_shorts = False  # Allow negative weights?
+
+# ============================================================================
+# 2. PARSE ASSETS
+# ============================================================================
+names = list(assets.keys())
+mu    = np.array([assets[a]["ret"] for a in names])   # expected returns
+vols  = np.array([assets[a]["vol"] for a in names])   # volatilities
+n     = len(names)
+idx   = {name: i for i, name in enumerate(names)}
+print(f"{n} assets: {names}\n")
+
+# ============================================================================
+# 3. CORRELATIONS → COVARIANCE MATRIX — EDIT ME
+# ============================================================================
+default_corr = 0.30  # applied to every pair unless overridden
+
+corr_overrides = {
+    ("US Equities", "Intl Equities"):  0.80,
+    ("US Equities", "Bonds"):         -0.10,
+    ("Intl Equities", "Bonds"):       -0.05,
+    ("Gold", "US Equities"):           0.00,
+    ("Gold", "Bonds"):                 0.10,
+}
+
+# Build correlation matrix
+corr = np.full((n, n), default_corr)
+np.fill_diagonal(corr, 1.0)
+for (a, b), rho in corr_overrides.items():
+    if a in idx and b in idx:
+        i, j = idx[a], idx[b]
+        corr[i, j] = corr[j, i] = rho
+
+# Check positive semidefiniteness
+min_eig = np.linalg.eigvalsh(corr).min()
+if min_eig < -1e-8:
+    print(f"WARNING: correlation matrix is NOT positive semidefinite (min eig = {min_eig:.4f}).\n")
+else:
+    print(f"Correlation matrix OK (min eigenvalue = {min_eig:.4f}).\n")
+
+# Covariance matrix
+cov = corr * np.outer(vols, vols)
+
+print("Correlation Matrix:")
+print(pd.DataFrame(corr, index=names, columns=names).round(2))
+print()
+
+# ============================================================================
+# 4. PORTFOLIO HELPER FUNCTIONS
+# ============================================================================
+def port_return(w):
+    return float(w @ mu)
+
+def port_vol(w):
+    return float(np.sqrt(w @ cov @ w))
+
+lb = -1.0 if allow_shorts else 0.0
+bounds = [(lb, 1.0)] * n
+sum_to_one = {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
+w0 = np.repeat(1.0 / n, n)
+
+# ============================================================================
+# 5. GLOBAL MINIMUM-VARIANCE PORTFOLIO
+# ============================================================================
+gmv = minimize(lambda w: w @ cov @ w, w0, method="SLSQP",
+               bounds=bounds, constraints=[sum_to_one])
+w_gmv   = gmv.x
+vol_gmv = port_vol(w_gmv)
+ret_gmv = port_return(w_gmv)
+print(f"GMV portfolio:   risk = {vol_gmv:.2%},  return = {ret_gmv:.2%}")
+
+# ============================================================================
+# 6. EFFICIENT FRONTIER
+# ============================================================================
+risk_min = vol_gmv
+risk_max = float(vols[np.argmax(mu)])
+risk_max = max(risk_max, risk_min + 1e-6)
+
+risk_grid = np.linspace(risk_min, risk_max, 60)
+
+f_vol, f_ret, f_w = [], [], []
+for target in risk_grid:
+    cons = [
+        sum_to_one,
+        {"type": "ineq", "fun": lambda w, t=target: t - port_vol(w)},
+    ]
+    res = minimize(lambda w: -port_return(w), w0, method="SLSQP",
+                   bounds=bounds, constraints=cons)
+    if res.success:
+        f_vol.append(port_vol(res.x))
+        f_ret.append(port_return(res.x))
+        f_w.append(res.x)
+
+f_vol = np.array(f_vol)
+f_ret = np.array(f_ret)
+f_w   = np.array(f_w)
+print(f"Computed {len(f_vol)} efficient portfolios "
+      f"(risk {f_vol.min():.2%} → {f_vol.max():.2%}, "
+      f"return {f_ret.min():.2%} → {f_ret.max():.2%}).\n")
+
+# ============================================================================
+# 7. MAX-SHARPE PORTFOLIO
+# ============================================================================
+def neg_sharpe(w):
+    return -(port_return(w) - rf) / port_vol(w)
+
+tan = minimize(neg_sharpe, w0, method="SLSQP", bounds=bounds, constraints=[sum_to_one])
+w_tan   = tan.x
+vol_tan = port_vol(w_tan)
+ret_tan = port_return(w_tan)
+sharpe  = (ret_tan - rf) / vol_tan
+print(f"Max-Sharpe:      risk = {vol_tan:.2%},  return = {ret_tan:.2%},  Sharpe = {sharpe:.2f}\n")
+
+# ============================================================================
+# 8. PLOT 1 — EFFICIENT FRONTIER
+# ============================================================================
+fig, ax = plt.subplots(figsize=(8, 6))
+ax.plot(f_vol, f_ret, lw=2.5, color="#1f3a93", label="Efficient frontier")
+ax.set_xlabel("Risk (volatility, σ)", fontsize=11)
+ax.set_ylabel("Expected return", fontsize=11)
+ax.set_title("Efficient Frontier", fontsize=12, fontweight="bold")
+ax.xaxis.set_major_formatter(PercentFormatter(1.0))
+ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+ax.grid(True, alpha=0.3)
+ax.legend(loc="best")
+plt.tight_layout()
+plt.show()
+
+# ============================================================================
+# 9. PLOT 2 — EFFICIENT FRONTIER + INDIVIDUAL ASSETS
+# ============================================================================
+fig, ax = plt.subplots(figsize=(8, 6))
+
+# Frontier
+ax.plot(f_vol, f_ret, lw=2.5, color="#1f3a93", label="Efficient frontier")
+
+# Individual assets
+ax.scatter(vols, mu, s=90, color="#c0392b", zorder=5, label="Individual assets")
+for name, v, m in zip(names, vols, mu):
+    ax.annotate(name, (v, m), textcoords="offset points", xytext=(7, 4), fontsize=9)
+
+# Key points
+ax.scatter([vol_gmv], [ret_gmv], marker="*", s=260, color="#27ae60",
+           edgecolor="black", linewidth=0.5, zorder=6, label="Min-variance")
+ax.scatter([vol_tan], [ret_tan], marker="*", s=260, color="#e67e22",
+           edgecolor="black", linewidth=0.5, zorder=6, label="Max-Sharpe")
+
+ax.set_xlabel("Risk (volatility, σ)", fontsize=11)
+ax.set_ylabel("Expected return", fontsize=11)
+ax.set_title("Efficient Frontier with Individual Assets", fontsize=12, fontweight="bold")
+ax.xaxis.set_major_formatter(PercentFormatter(1.0))
+ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+ax.grid(True, alpha=0.3)
+ax.legend(loc="best")
+plt.tight_layout()
+plt.show()
+
+# ============================================================================
+# 10. PORTFOLIO WEIGHTS (OPTIONAL)
+# ============================================================================
+print("Portfolio Weights:")
+summary = pd.DataFrame({"Min-variance": w_gmv, "Max-Sharpe": w_tan}, index=names)
+summary.loc["Return"] = [ret_gmv, ret_tan]
+summary.loc["Risk"]   = [vol_gmv, vol_tan]
+print(summary.round(4).map(lambda x: f"{x:.2%}" if isinstance(x, float) else x))
