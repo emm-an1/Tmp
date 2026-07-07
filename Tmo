@@ -1,261 +1,615 @@
-#!/usr/bin/env python3
-"""
-Efficient Frontier from Price Data (Mean–Variance Optimization)
-
-Inputs: Excel file with daily asset prices (col A = date, remaining = prices, row 1 = header)
-Outputs: estimated risk/return, efficient frontier plots, and key portfolio weights
-
-Estimation method:
-  - Risk (vol): annualized covariance from the 5 most recent years of daily returns
-  - Expected return: 12-1 month momentum (price change from 12mo ago to 1mo ago), annualized
-"""
-
-import os
+# ========== SETUP ==========
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
+from scipy import stats
 import matplotlib.pyplot as plt
-from matplotlib.ticker import PercentFormatter
+%matplotlib inline
 
-np.set_printoptions(precision=4, suppress=True)
+rng = np.random.default_rng(42)
+print("setup ok — numpy", np.__version__, "| pandas", pd.__version__)
 
-# ============================================================================
-# DATA INPUT & ESTIMATION OF EXPECTED RETURNS (r) AND RISK
-# ============================================================================
-# --- File location — EDIT ME ---
-DATA_PATH = "."                    # folder containing the file
-DATA_FILE = "asset_prices.xlsx"    # Excel file name
-SHEET     = 0                      # sheet name or index
 
-# --- Estimation settings ---
-TRADING_DAYS       = 252     # annualization factor for daily data
-COV_YEARS          = 5       # lookback (years) for the covariance matrix
-ANNUALIZE_MOMENTUM = True    # scale the 11-month (12-1) return to an annual figure
+# ========== 1. NUMPY ==========
+# --- Example 1.1: arrays, dtypes, shapes ---
+a = np.array([1, 2, 3], dtype=np.float64)
+M = np.zeros((3, 4))
+print(np.arange(0, 1, 0.2))
+print(np.linspace(0, 1, 5))
+print("shape", M.shape, "| ndim", M.ndim, "| dtype", M.dtype, "| size", M.size)
 
-# --- Portfolio settings ---
-rf           = 0.01          # risk-free rate (used for max-Sharpe)
-allow_shorts = False         # False = long-only (weights >= 0)
+# ▶ YOUR TURN — replicate the example above:
 
-full_path = os.path.join(DATA_PATH, DATA_FILE)
 
-# --- Load prices: col A = date, remaining cols = asset prices, row 1 = header ---
-print(f"Loading {full_path}...")
-prices = pd.read_excel(full_path, sheet_name=SHEET)
-prices = prices.set_index(prices.columns[0])
-prices.index = pd.to_datetime(prices.index)
-prices = prices.sort_index().dropna(how="all")
+# --- Example 1.2: vectorization vs Python loops ---
+x = rng.standard_normal(100_000)
 
-names = list(prices.columns)
-n     = len(names)
-print(f"Loaded {len(prices):,} rows | {n} assets: {names}")
-print(f"Price history: {prices.index.min().date()} -> {prices.index.max().date()}\n")
+def slow_sum_sq(v):
+    total = 0.0
+    for e in v:
+        total += e * e
+    return total
 
-# --- Daily simple returns ---
-# (Alternative: log returns via np.log(prices).diff())
-daily_ret = prices.pct_change().dropna(how="all")
+def fast_sum_sq(v):
+    return np.sum(v**2)
 
-# --- RISK: covariance from the most recent COV_YEARS of daily returns (annualized) ---
-last_date  = prices.index.max()
-cov_start  = last_date - pd.DateOffset(years=COV_YEARS)
-ret_window = daily_ret.loc[daily_ret.index >= cov_start].dropna()
+print(slow_sum_sq(x), fast_sum_sq(x))
 
-cov  = ret_window.cov().values * TRADING_DAYS      # annualized covariance matrix
-vols = np.sqrt(np.diag(cov))                       # annualized volatilities
+# ▶ YOUR TURN — replicate the example above:
 
-print(f"Covariance window: {ret_window.index.min().date()} -> "
-      f"{ret_window.index.max().date()} ({len(ret_window):,} trading days)")
-if ret_window.index.min().date() > cov_start.date():
-    print(f"  NOTE: fewer than {COV_YEARS}y available; used all {len(ret_window):,} days.")
-print()
 
-# --- EXPECTED RETURN: 12-1 month momentum (skip the most recent month) ---
-# This captures ~11 months of price change, skipping the recent month to avoid short-term reversal.
-mom_end   = last_date - pd.DateOffset(months=1)    # ~1 month ago
-mom_start = last_date - pd.DateOffset(months=12)   # ~12 months ago
+# --- Example 1.3: broadcasting (z-score each column) ---
+X = rng.standard_normal((1000, 3))
+col_means = X.mean(axis=0)
+col_std   = X.std(axis=0)
+X_std = (X - col_means) / col_std
+print("col means ~0:", X_std.mean(axis=0).round(6))
+print("col stds  ~1:", X_std.std(axis=0).round(6))
 
-if not (prices.index <= mom_start).any():
-    raise ValueError("Not enough history to compute 12-1 momentum. Provide more data.")
+# ▶ YOUR TURN — replicate the example above:
 
-# Nearest available trading day on or before each target date
-end_used   = prices.index[prices.index <= mom_end].max()
-start_used = prices.index[prices.index <= mom_start].max()
-p_end, p_start = prices.loc[end_used], prices.loc[start_used]
 
-mom_11m = (p_end / p_start) - 1.0                  # 11-month cumulative return
-if ANNUALIZE_MOMENTUM:
-    mu = ((1.0 + mom_11m) ** (12.0 / 11.0) - 1.0).values   # -> annualized
-else:
-    mu = mom_11m.values                            # raw 11-month return
+# --- Example 1.4: indexing, slicing, boolean masks ---
+x = np.arange(10)
+print("slice 2:7:2 ->", x[2:7:2])
+print("reversed   ->", x[::-1])
+mask = x % 2 == 0
+print("evens (boolean mask) ->", x[mask])
+print("np.where if/else     ->", np.where(x > 3, x, -1))
 
-print(f"Momentum window (12-1): {start_used.date()} -> {end_used.date()} "
-      f"(most recent month skipped)\n")
+# ▶ YOUR TURN — replicate the example above:
 
-# --- Summary of inputs feeding the optimizer ---
-est = pd.DataFrame({"Exp.return(ann)": mu, "Vol(ann)": vols}, index=names)
-disp = est.copy()
-for c in disp.columns:
-    disp[c] = disp[c].map(lambda x: f"{x:.2%}")
-print("Estimated inputs:")
-print(disp.to_string())
-print()
 
-corr = cov / np.outer(vols, vols)
-print("Implied correlation matrix (from covariance):")
-print(pd.DataFrame(corr, index=names, columns=names).round(2).to_string())
-print()
+# --- Example 1.5: reductions and the axis argument ---
+M = np.arange(6).reshape(2, 3)
+print("sum all          ->", M.sum())
+print("sum axis=0 (cols)->", M.sum(axis=0))
+print("sum axis=1 (rows)->", M.sum(axis=1))
+print("argmax per row   ->", np.argmax(M, axis=1))
 
-# ============================================================================
-# PORTFOLIO HELPERS AND OPTIMIZER SETUP
-# ============================================================================
-def port_return(w):
-    """Expected return of a portfolio with weights w."""
-    return float(w @ mu)
+# ▶ YOUR TURN — replicate the example above:
 
-def port_vol(w):
-    """Volatility (standard deviation) of a portfolio with weights w."""
-    return float(np.sqrt(w @ cov @ w))
 
-lb = -1.0 if allow_shorts else 0.0
-bounds = [(lb, 1.0)] * n
-sum_to_one = {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
-w0 = np.repeat(1.0 / n, n)   # equal-weight starting point
+# --- Example 1.6: random numbers ---
+print("normals :", rng.standard_normal(3).round(3))
+print("dice    :", rng.integers(1, 7, 10))
+print("weighted:", rng.choice([1, 2, 3], size=8, p=[.5, .3, .2]))
 
-# ============================================================================
-# GLOBAL MINIMUM-VARIANCE (GMV) PORTFOLIO
-# ============================================================================
-gmv = minimize(lambda w: w @ cov @ w, w0, method="SLSQP",
-               bounds=bounds, constraints=[sum_to_one])
-w_gmv   = gmv.x
-vol_gmv = port_vol(w_gmv)
-ret_gmv = port_return(w_gmv)
-print(f"GMV portfolio:   risk = {vol_gmv:.2%},  return = {ret_gmv:.2%}")
+# ▶ YOUR TURN — replicate the example above:
 
-# ============================================================================
-# EFFICIENT FRONTIER OVER A GRID OF RISKS
-# ============================================================================
-# For each target risk level, maximize expected return subject to vol <= target.
-# This traces the efficient frontier from the GMV point to the highest-return asset.
-risk_min = vol_gmv
-risk_max = max(float(vols[np.argmax(mu)]), risk_min + 1e-6)
-risk_grid = np.linspace(risk_min, risk_max, 60)
 
-f_vol, f_ret, f_w = [], [], []
-for target in risk_grid:
-    cons = [
-        sum_to_one,
-        {"type": "ineq", "fun": lambda w, t=target: t - port_vol(w)},   # vol <= target
-    ]
-    res = minimize(lambda w: -port_return(w), w0, method="SLSQP",
-                   bounds=bounds, constraints=cons)
-    if res.success:
-        f_vol.append(port_vol(res.x))
-        f_ret.append(port_return(res.x))
-        f_w.append(res.x)
+# --- Example 1.7: linear algebra basics ---
+A = np.array([[2., 1.], [1., 3.]])
+b = np.array([1., 2.])
+print("A @ b        :", A @ b)
+print("solve Ax=b   :", np.linalg.solve(A, b))
+vals, vecs = np.linalg.eig(A)
+print("eigenvalues  :", vals.round(4))
 
-f_vol = np.array(f_vol)
-f_ret = np.array(f_ret)
-f_w   = np.array(f_w)
-print(f"Computed {len(f_vol)} efficient portfolios "
-      f"(risk {f_vol.min():.2%} -> {f_vol.max():.2%}, "
-      f"return {f_ret.min():.2%} -> {f_ret.max():.2%}).")
-print()
+# ▶ YOUR TURN — replicate the example above:
 
-# ============================================================================
-# MAXIMUM-SHARPE / TANGENCY PORTFOLIO
-# ============================================================================
-tan = minimize(lambda w: -(port_return(w) - rf) / port_vol(w), w0, method="SLSQP",
-               bounds=bounds, constraints=[sum_to_one])
-w_tan   = tan.x
-vol_tan = port_vol(w_tan)
-ret_tan = port_return(w_tan)
-sharpe  = (ret_tan - rf) / vol_tan
-print(f"Max-Sharpe:      risk = {vol_tan:.2%},  return = {ret_tan:.2%},  Sharpe = {sharpe:.2f}")
-print()
 
-# ============================================================================
-# PLOT 1 — EFFICIENT FRONTIER
-# ============================================================================
-fig, ax = plt.subplots(figsize=(8, 6))
-ax.plot(f_vol, f_ret, lw=2.5, color="#1f3a93", label="Efficient frontier")
-ax.set_xlabel("Risk (volatility, σ)", fontsize=11)
-ax.set_ylabel("Expected return", fontsize=11)
-ax.set_title("Efficient Frontier", fontsize=12, fontweight="bold")
-ax.xaxis.set_major_formatter(PercentFormatter(1.0))
-ax.yaxis.set_major_formatter(PercentFormatter(1.0))
-ax.grid(True, alpha=0.3)
-ax.legend(loc="best")
-plt.tight_layout()
+# --- Example 1.8: views vs copies ---
+x = np.arange(5)
+view = x[1:4]
+view[0] = 999
+print("mutating a view changed the original:", x)
+
+y = np.arange(5)[1:4].copy()
+y[0] = -1
+print("copy left its source intact")
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# ========== 2. PANDAS ==========
+# --- Example 2.1: Series and DataFrame basics ---
+s = pd.Series([1, 2, 3], index=['a', 'b', 'c'])
+df = pd.DataFrame({'price': [100, 101, 99], 'vol': [1e6, 1.2e6, 0.9e6]})
+print(df)
+print(df.describe())
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 2.2: loc vs iloc + boolean filtering ---
+df = pd.DataFrame({'price': [100, 101, 99], 'vol': [1e6, 1.2e6, 0.9e6]})
+print("loc[0,'price'] ->", df.loc[0, 'price'])
+print("iloc[0,0]      ->", df.iloc[0, 0])
+print(df.loc[df['vol'] > 1e6])
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 2.3: groupby / aggregate ---
+gdf = pd.DataFrame({'sector': ['A', 'A', 'B', 'B', 'B'],
+                    'ret':    [0.01, 0.02, -0.01, 0.03, 0.00]})
+print(gdf.groupby('sector')['ret'].mean())
+print(gdf.groupby('sector').agg(mean_ret=('ret', 'mean'),
+                                vol=('ret', 'std'),
+                                n=('ret', 'size')))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# SETUP for section 4 — a synthetic 3-year daily price series
+idx4 = pd.date_range('2020-01-01', periods=252*3, freq='B')
+prices = pd.Series(100*np.exp(np.cumsum(rng.normal(0.0003, 0.01, len(idx4)))), index=idx4)
+print("price series:", len(prices), "obs, from", prices.index[0].date(), "to", prices.index[-1].date())
+
+# --- Example 2.4: time series (resample, rolling, returns) ---
+idx = pd.date_range('2024-01-01', periods=252, freq='B')
+prices = pd.Series(100*np.exp(np.cumsum(rng.normal(0, 0.01, 252))), index=idx)
+print("month-end prices:\n", prices.resample('ME').last().head())
+print("\n20-day MA (tail):\n", prices.rolling(20).mean().tail(3))
+print("\nsimple returns (tail):\n", prices.pct_change().tail(3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 2.5: merge / concat ---
+left  = pd.DataFrame({'date': [1, 2, 3], 'x': [10, 20, 30]})
+right = pd.DataFrame({'date': [2, 3, 4], 'y': [200, 300, 400]})
+print(pd.merge(left, right, on='date', how='inner'))
+print(pd.concat([left, right], axis=0, ignore_index=True))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 2.6: the SettingWithCopy fix ---
+df = pd.DataFrame({'x': [-1, 2, -3, 4], 'y': [0, 0, 0, 0]})
+df.loc[df.x > 0, 'y'] = 1
+print(df)
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# ========== 3. PROBABILITY & STATS ==========
+# --- Example 3.1: distributions (pdf / cdf / ppf / rvs) ---
+print("pdf N(0,1) at 0 :", round(stats.norm.pdf(0), 4))
+print("cdf at 1.96     :", round(stats.norm.cdf(1.96), 4))
+print("ppf(0.975)      :", round(stats.norm.ppf(0.975), 4))
+print("t(df=5) sample  :", stats.t(df=5).rvs(3, random_state=rng).round(3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 3.2: moments and shape ---
+x = rng.standard_normal(10_000)
+print("mean", round(x.mean(), 3), "| sample std (ddof=1)", round(x.std(ddof=1), 3))
+print("skew", round(stats.skew(x), 3), "| excess kurtosis", round(stats.kurtosis(x), 3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 3.3: covariance vs correlation ---
+Xmv = rng.multivariate_normal([0, 0], [[1, 0.6], [0.6, 1]], size=1000)
+print("covariance:\n", np.cov(Xmv.T).round(3))
+print("correlation (scale-free, in [-1,1]):\n", np.corrcoef(Xmv.T).round(3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 3.4: two-sample t-test ---
+a = rng.normal(0.0, 1, 100)
+b = rng.normal(0.3, 1, 100)
+t_stat, p_val = stats.ttest_ind(a, b)
+print(f"t = {t_stat:.3f}, p = {p_val:.4f}   -> reject equal-means H0 if p < 0.05")
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 3.5: CLT ---
+means = np.array([rng.exponential(1, size=50).mean() for _ in range(5000)])
+print("mean of the sample-means:", round(means.mean(), 3), "(population mean = 1.0)")
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Plot 3.5: the sample-means are bell-shaped (CLT) ---
+plt.figure(figsize=(5, 3))
+plt.hist(means, bins=40, edgecolor='white')
+plt.title("CLT: distribution of sample means (exponential base)")
+plt.xlabel("sample mean"); plt.ylabel("count")
 plt.show()
 
-# ============================================================================
-# PLOT 2 — EFFICIENT FRONTIER WITH INDIVIDUAL ASSETS
-# ============================================================================
-fig, ax = plt.subplots(figsize=(8, 6))
+# ▶ YOUR TURN — replicate the example above:
 
-# Frontier
-ax.plot(f_vol, f_ret, lw=2.5, color="#1f3a93", label="Efficient frontier")
 
-# Individual assets
-ax.scatter(vols, mu, s=90, color="#c0392b", zorder=5, label="Individual assets")
-for name, v, m in zip(names, vols, mu):
-    ax.annotate(name, (v, m), textcoords="offset points", xytext=(7, 4), fontsize=9)
+# ========== 4. RETURNS & TIME SERIES ==========
+# --- Example 4.1: simple vs log returns ---
+simple  = prices.pct_change()
+log_ret = np.log(prices).diff()
+print(pd.DataFrame({'simple': simple, 'log': log_ret}).tail(3))
+print("max |log - simple| (tiny for small returns):", (log_ret - simple).abs().max().round(5))
 
-# Key points: min-variance (green star) and max-Sharpe (orange star)
-ax.scatter([vol_gmv], [ret_gmv], marker="*", s=260, color="#27ae60",
-           edgecolor="black", linewidth=0.5, zorder=6, label="Min-variance")
-ax.scatter([vol_tan], [ret_tan], marker="*", s=260, color="#e67e22",
-           edgecolor="black", linewidth=0.5, zorder=6, label="Max-Sharpe")
+# ▶ YOUR TURN — replicate the example above:
 
-ax.set_xlabel("Risk (volatility, σ)", fontsize=11)
-ax.set_ylabel("Expected return", fontsize=11)
-ax.set_title("Efficient Frontier with Individual Assets", fontsize=12, fontweight="bold")
-ax.xaxis.set_major_formatter(PercentFormatter(1.0))
-ax.yaxis.set_major_formatter(PercentFormatter(1.0))
-ax.grid(True, alpha=0.3)
-ax.legend(loc="best")
-plt.tight_layout()
+
+# --- Example 4.2: volatility, annualization, Sharpe ---
+log_ret = np.log(prices).diff().dropna()
+ann_vol = log_ret.std()  * np.sqrt(252)
+ann_ret = log_ret.mean() * 252
+sharpe  = (log_ret.mean() / log_ret.std()) * np.sqrt(252)
+print(f"ann_vol={ann_vol:.3f}  ann_ret={ann_ret:.3f}  Sharpe={sharpe:.3f}")
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 4.3: rolling vs EWMA volatility ---
+log_ret = np.log(prices).diff().dropna()
+roll_vol = log_ret.rolling(21).std() * np.sqrt(252)
+ewma_vol = log_ret.ewm(span=21).std() * np.sqrt(252)
+print(pd.DataFrame({'rolling21': roll_vol, 'ewma21': ewma_vol}).tail(3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 4.4: ADF test & ACF ---
+from statsmodels.tsa.stattools import adfuller, acf
+log_ret = np.log(prices).diff().dropna()
+adf_stat, p, *_ = adfuller(log_ret)
+print(f"ADF stat = {adf_stat:.3f}, p = {p:.4f}  (p<0.05 => stationary)")
+print("ACF lags 0-5:", acf(log_ret, nlags=5).round(3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 4.5: fit a simple ARIMA and forecast 5 steps ---
+from statsmodels.tsa.arima.model import ARIMA
+log_ret = np.log(prices).diff().dropna()
+model = ARIMA(log_ret, order=(1, 0, 1)).fit()
+print("5-step forecast:", np.round(model.forecast(steps=5).to_numpy(), 6).tolist())
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# ========== 5. MONTE CARLO ==========
+# --- Example 5.1: estimate pi with Monte Carlo ---
+N = 1_000_000
+pts = rng.uniform(-1, 1, size=(N, 2))
+inside = (pts[:, 0]**2 + pts[:, 1]**2) <= 1
+print("pi ≈", 4 * inside.mean())
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 5.2: GBM simulators ---
+def simulate_terminal(S0, r, sigma, T, N, rng):
+    Z = rng.standard_normal(N)
+    return S0 * np.exp((r - 0.5*sigma**2)*T + sigma*np.sqrt(T)*Z)
+
+def simulate_paths(S0, r, sigma, T, steps, N, rng):
+    dt = T / steps
+    Z = rng.standard_normal((N, steps))
+    increments = (r - 0.5*sigma**2)*dt + sigma*np.sqrt(dt)*Z
+    log_paths = np.log(S0) + np.cumsum(increments, axis=1)
+    return np.exp(log_paths)
+
+paths = simulate_paths(100, 0.05, 0.2, 1.0, 252, 5, rng)
+print("paths shape:", paths.shape, "| terminal prices:", paths[:, -1].round(2))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 5.3: European call, Monte Carlo vs Black-Scholes ---
+from scipy.stats import norm
+
+def bs_call(S, K, T, r, sigma):
+    d1 = (np.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
+    d2 = d1 - sigma*np.sqrt(T)
+    return S*norm.cdf(d1) - K*np.exp(-r*T)*norm.cdf(d2)
+
+def mc_call(S, K, T, r, sigma, N, rng):
+    ST = simulate_terminal(S, r, sigma, T, N, rng)
+    payoff = np.exp(-r*T) * np.maximum(ST - K, 0.0)
+    return payoff.mean(), payoff.std(ddof=1)/np.sqrt(N)
+
+S, K, T, r, sigma = 100, 105, 1.0, 0.05, 0.20
+analytic = bs_call(S, K, T, r, sigma)
+price, se = mc_call(S, K, T, r, sigma, 1_000_000, rng)
+print(f"Black-Scholes : {analytic:.4f}")
+print(f"Monte Carlo   : {price:.4f}  (95% CI ±{1.96*se:.4f})")
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Plot 5.4: MC error shrinks like 1/sqrt(N) ---
+Ns = np.array([100, 300, 1000, 3000, 10_000, 30_000, 100_000, 300_000])
+errs = np.array([abs(mc_call(S, K, T, r, sigma, int(n), rng)[0] - analytic) for n in Ns])
+plt.figure(figsize=(5, 3))
+plt.loglog(Ns, errs, 'o-', label='|MC - BS|')
+plt.loglog(Ns, errs[0]*np.sqrt(Ns[0]/Ns), '--', label='1/sqrt(N) reference')
+plt.xlabel('N (paths)'); plt.ylabel('abs error'); plt.legend(); plt.title('MC convergence')
 plt.show()
 
-# ============================================================================
-# PORTFOLIO WEIGHTS (OPTIONAL)
-# ============================================================================
-print("Portfolio Weights:")
-summary = pd.DataFrame({"Min-variance": w_gmv, "Max-Sharpe": w_tan}, index=names)
-summary.loc["Return"] = [ret_gmv, ret_tan]
-summary.loc["Risk"]   = [vol_gmv, vol_tan]
-print(summary.round(4).map(lambda x: f"{x:.2%}" if isinstance(x, float) else x).to_string())
+# ▶ YOUR TURN — replicate the example above:
 
-# ============================================================================
-# NOTES & CAVEATS
-# ============================================================================
-print("\n" + "="*80)
-print("NOTES:")
-print("="*80)
-print("""
-1. Momentum ≠ Forecast
-   12-1 momentum is a heuristic, not a true expected-return forecast.
-   It is noisy and can be negative. Mean-variance optimization amplifies
-   estimation error; consider shrinkage, resampling, or Black–Litterman methods.
 
-2. Horizon Consistency
-   - Covariance is annualized (× 252 trading days)
-   - 11-month momentum is annualized via (1+r)^(12/11) - 1
-   Both axes are on an annual scale. Set ANNUALIZE_MOMENTUM=False for raw 11-month return.
+# --- Example 5.5: antithetic & control variates ---
+def mc_call_antithetic(S, K, T, r, sigma, N, rng):
+    Zh = rng.standard_normal(N // 2)
+    def payoff(z):
+        ST = S*np.exp((r - 0.5*sigma**2)*T + sigma*np.sqrt(T)*z)
+        return np.exp(-r*T)*np.maximum(ST - K, 0.0)
+    pooled = 0.5*(payoff(Zh) + payoff(-Zh))
+    return pooled.mean(), pooled.std(ddof=1)/np.sqrt(N // 2)
 
-3. Two Different Windows by Design
-   - Covariance: 5 most recent years of daily returns
-   - Expected return: trailing 12-1 months (recent month skipped)
+def mc_call_control(S, K, T, r, sigma, N, rng):
+    Z = rng.standard_normal(N)
+    ST = S*np.exp((r - 0.5*sigma**2)*T + sigma*np.sqrt(T)*Z)
+    Y  = np.exp(-r*T)*np.maximum(ST - K, 0.0)
+    Xc = ST
+    c  = np.cov(Y, Xc, ddof=1)[0, 1] / np.var(Xc, ddof=1)
+    Yc = Y - c*(Xc - S*np.exp(r*T))
+    return Yc.mean(), Yc.std(ddof=1)/np.sqrt(N)
 
-4. Simple vs Log Returns
-   Simple returns are used (consistent with portfolio arithmetic).
-   Log returns (np.log(prices).diff()) are a common alternative;
-   difference is negligible at daily frequency.
+_, se_plain = mc_call(S, K, T, r, sigma, 1_000_000, rng)
+_, se_anti  = mc_call_antithetic(S, K, T, r, sigma, 1_000_000, rng)
+_, se_ctrl  = mc_call_control(S, K, T, r, sigma, 1_000_000, rng)
+print(f"plain SE   : {se_plain:.5f}")
+print(f"antithetic : {se_anti:.5f}   (variance reduction x{(se_plain/se_anti)**2:.2f})")
+print(f"control    : {se_ctrl:.5f}   (variance reduction x{(se_plain/se_ctrl)**2:.2f})")
 
-5. Long-Only, No Leverage
-   Weights sum to 1; the frontier's top is the single highest-momentum asset.
-   Set allow_shorts=True to allow negative weights (short positions).
+# ▶ YOUR TURN — replicate the example above:
 
-6. Solver: SciPy SLSQP
-   Reliable for small portfolios (< 20 assets). For larger problems or
-   ill-conditioned covariance, use a dedicated convex solver (e.g., cvxpy).
-""")
+
+# --- Example 5.6: Asian call (payoff on the average price) ---
+def mc_asian_call(S, K, T, r, sigma, steps, N, rng):
+    paths = simulate_paths(S, r, sigma, T, steps, N, rng)
+    avg = paths.mean(axis=1)
+    payoff = np.exp(-r*T)*np.maximum(avg - K, 0.0)
+    return payoff.mean(), payoff.std(ddof=1)/np.sqrt(N)
+
+price_a, se_a = mc_asian_call(100, 100, 1.0, 0.05, 0.2, 252, 200_000, rng)
+print(f"Asian call ≈ {price_a:.4f}  (±{1.96*se_a:.4f})")
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 5.7: turn independent normals into correlated ones ---
+corr = np.array([[1.0, 0.5], [0.5, 1.0]])
+L = np.linalg.cholesky(corr)
+Z = rng.standard_normal((100_000, 2))
+correlated = Z @ L.T
+print("target corr 0.5 -> sample corr:", np.corrcoef(correlated.T)[0, 1].round(3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# ========== 6. REGRESSION ==========
+# SETUP for section 6 — synthetic regression data
+n = 500
+x1 = rng.standard_normal(n)
+x2 = rng.standard_normal(n)
+y  = 1.0 + 2.0*x1 - 1.5*x2 + rng.standard_normal(n)*0.5
+features = np.column_stack([x1, x2])
+print("regression data ready:", features.shape)
+
+# --- Example 6.1: OLS from scratch ---
+Xdesign = np.column_stack([np.ones(n), x1, x2])
+beta, *_ = np.linalg.lstsq(Xdesign, y, rcond=None)
+print("beta (const, b1, b2):", beta.round(3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 6.2: statsmodels OLS with a coefficient table ---
+import statsmodels.api as sm
+Xsm = sm.add_constant(np.column_stack([x1, x2]))
+res = sm.OLS(y, Xsm).fit()
+print("params:", res.params.round(3), "| R^2:", round(res.rsquared, 3),
+      "| adj R^2:", round(res.rsquared_adj, 3))
+print(res.summary().tables[1])
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 6.3: sklearn LinearRegression with a train/test split ---
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_squared_error
+
+Xtr, Xte, ytr, yte = train_test_split(features, y, test_size=0.3, random_state=1)
+lr = LinearRegression().fit(Xtr, ytr)
+pred = lr.predict(Xte)
+print("test R^2:", round(r2_score(yte, pred), 3))
+print("test RMSE:", round(np.sqrt(mean_squared_error(yte, pred)), 3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 6.4: variance inflation factor ---
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+Xv = np.column_stack([x1, x2])
+vifs = [variance_inflation_factor(Xv, i) for i in range(Xv.shape[1])]
+print("VIFs:", np.round(vifs, 2))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 6.5: Ridge (L2) vs Lasso (L1) ---
+from sklearn.linear_model import Ridge, Lasso
+print("Ridge coefs:", Ridge(alpha=1.0).fit(Xtr, ytr).coef_.round(3))
+print("Lasso coefs:", Lasso(alpha=0.1).fit(Xtr, ytr).coef_.round(3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# ========== 7. MACHINE LEARNING ==========
+# --- Example 7.1: k-fold cross-validation ---
+from sklearn.model_selection import cross_val_score
+from sklearn.linear_model import LinearRegression
+scores = cross_val_score(LinearRegression(), features, y, cv=5, scoring='r2')
+print("R^2 per fold:", scores.round(3))
+print("mean:", scores.mean().round(3), "| std:", scores.std().round(3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 7.1b: TimeSeriesSplit (train always before test) ---
+from sklearn.model_selection import TimeSeriesSplit
+tscv = TimeSeriesSplit(n_splits=4)
+for i, (tr, te) in enumerate(tscv.split(np.arange(12))):
+    print(f"fold {i}: train={str(tr.tolist()):<24} test={te.tolist()}")
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 7.2: StandardScaler, no leakage ---
+from sklearn.preprocessing import StandardScaler
+scaler = StandardScaler().fit(Xtr)
+Xtr_s = scaler.transform(Xtr)
+Xte_s = scaler.transform(Xte)
+print("train mean ~0:", Xtr_s.mean(axis=0).round(3), "| train std ~1:", Xtr_s.std(axis=0).round(3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 7.3: logistic regression + AUC ---
+from sklearn.datasets import make_classification
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+
+Xc, yc = make_classification(n_samples=600, n_features=5, random_state=0)
+Xctr, Xcte, yctr, ycte = train_test_split(Xc, yc, test_size=0.3, random_state=0)
+clf = LogisticRegression(max_iter=1000).fit(Xctr, yctr)
+proba = clf.predict_proba(Xcte)[:, 1]
+print("test AUC:", round(roc_auc_score(ycte, proba), 3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# SETUP for clustering — 3 blobs, standardized
+from sklearn.datasets import make_blobs
+from sklearn.preprocessing import StandardScaler
+Xblobs, _ = make_blobs(n_samples=300, centers=3, cluster_std=1.0, random_state=42)
+Xs = StandardScaler().fit_transform(Xblobs)
+print("clustering data ready:", Xs.shape)
+
+# --- Example 7.4a: k-means ---
+from sklearn.cluster import KMeans
+km = KMeans(n_clusters=3, n_init=10, random_state=42).fit(Xs)
+print("inertia (lower = tighter):", round(km.inertia_, 2))
+print("cluster sizes:", np.bincount(km.labels_))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 7.4b: elbow inertia + silhouette ---
+from sklearn.metrics import silhouette_score
+inertias = [KMeans(k, n_init=10, random_state=0).fit(Xs).inertia_ for k in range(1, 7)]
+print("inertia by k=1..6:", [round(v, 1) for v in inertias])
+print("silhouette (k=3):", round(silhouette_score(Xs, km.labels_), 3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Plot 7.4: elbow curve + coloured clusters ---
+fig, ax = plt.subplots(1, 2, figsize=(9, 3.2))
+ax[0].plot(range(1, 7), inertias, 'o-'); ax[0].set_title('Elbow')
+ax[0].set_xlabel('k'); ax[0].set_ylabel('inertia')
+ax[1].scatter(Xs[:, 0], Xs[:, 1], c=km.labels_, cmap='viridis', s=15)
+ax[1].scatter(km.cluster_centers_[:, 0], km.cluster_centers_[:, 1],
+              c='red', marker='X', s=140, edgecolor='black')
+ax[1].set_title('k-means clusters (k=3)')
+plt.tight_layout(); plt.show()
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 7.4c: hierarchical clustering ---
+from sklearn.cluster import AgglomerativeClustering
+hier = AgglomerativeClustering(n_clusters=3, linkage='ward').fit(Xs)
+print("hierarchical cluster sizes:", np.bincount(hier.labels_))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 7.4d: GMM gives membership probabilities ---
+from sklearn.mixture import GaussianMixture
+gmm = GaussianMixture(n_components=3, random_state=0).fit(Xs)
+print("hard labels (first 10):", gmm.predict(Xs)[:10])
+print("soft probs (first point):", gmm.predict_proba(Xs)[0].round(3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 7.5: PCA ---
+from sklearn.decomposition import PCA
+pca = PCA(n_components=2).fit(Xs)
+print("explained variance ratio:", pca.explained_variance_ratio_.round(3))
+print("projected shape:", pca.transform(Xs).shape)
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# ========== 8. CODING PATTERNS ==========
+# --- Example 8.1: moving average via prefix sums ---
+def moving_avg(x, w):
+    c = np.cumsum(np.insert(x, 0, 0))
+    return (c[w:] - c[:-w]) / w
+
+print(moving_avg(np.arange(1, 8, dtype=float), 3))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 8.2: maximum drawdown ---
+def max_drawdown(prices):
+    prices = np.asarray(prices, float)
+    running_max = np.maximum.accumulate(prices)
+    drawdowns = prices/running_max - 1.0
+    return drawdowns.min()
+
+print("max drawdown:", round(max_drawdown([100, 120, 90, 110, 80, 130]), 4))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 8.3: two-sum ---
+def two_sum(nums, target):
+    seen = {}
+    for i, v in enumerate(nums):
+        if target - v in seen:
+            return (seen[target - v], i)
+        seen[v] = i
+    return None
+
+print(two_sum([2, 7, 11, 15], 9))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 8.4: sliding_window_view ---
+from numpy.lib.stride_tricks import sliding_window_view
+x = np.arange(10, dtype=float)
+windows = sliding_window_view(x, 4)
+print("rolling means:", windows.mean(axis=1))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# ========== 9. BRAINTEASERS ==========
+# --- Example 9.1: birthday problem ---
+def birthday_sim(n_people, trials, rng):
+    hits = 0
+    for _ in range(trials):
+        days = rng.integers(0, 365, n_people)
+        if len(np.unique(days)) < n_people:
+            hits += 1
+    return hits / trials
+
+print("P(shared birthday, n=23):", birthday_sim(23, 20_000, rng))
+
+# ▶ YOUR TURN — replicate the example above:
+
+
+# --- Example 9.2: Monty Hall ---
+def monty_hall(trials, rng):
+    car  = rng.integers(0, 3, trials)
+    pick = rng.integers(0, 3, trials)
+    return (car != pick).mean()
+
+print("P(win | switch):", round(monty_hall(100_000, rng), 3))
+
+# ▶ YOUR TURN — replicate the example above:
