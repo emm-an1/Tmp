@@ -1,6 +1,23 @@
+#!/usr/bin/env python3
+"""
+Efficient Frontier from Price Data (Mean–Variance Optimization)
+
+Inputs: Excel file with daily asset prices (col A = date, remaining = prices, row 1 = header)
+Outputs: estimated risk/return, efficient frontier plots, and key portfolio weights
+
+Estimation method:
+  - Risk (vol): annualized covariance from the 5 most recent years of daily returns
+  - Expected return: 12-1 month momentum (price change from 12mo ago to 1mo ago), annualized
+"""
+
 import os
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize
+import matplotlib.pyplot as plt
+from matplotlib.ticker import PercentFormatter
+
+np.set_printoptions(precision=4, suppress=True)
 
 # ============================================================================
 # DATA INPUT & ESTIMATION OF EXPECTED RETURNS (r) AND RISK
@@ -15,13 +32,14 @@ TRADING_DAYS       = 252     # annualization factor for daily data
 COV_YEARS          = 5       # lookback (years) for the covariance matrix
 ANNUALIZE_MOMENTUM = True    # scale the 11-month (12-1) return to an annual figure
 
-# --- Portfolio settings (used later by the optimizer) ---
-rf           = 0.01          # risk-free rate (for max-Sharpe)
+# --- Portfolio settings ---
+rf           = 0.01          # risk-free rate (used for max-Sharpe)
 allow_shorts = False         # False = long-only (weights >= 0)
 
 full_path = os.path.join(DATA_PATH, DATA_FILE)
 
-# --- Load prices: col A = date, remaining cols = asset prices, row 1 = header
+# --- Load prices: col A = date, remaining cols = asset prices, row 1 = header ---
+print(f"Loading {full_path}...")
 prices = pd.read_excel(full_path, sheet_name=SHEET)
 prices = prices.set_index(prices.columns[0])
 prices.index = pd.to_datetime(prices.index)
@@ -30,9 +48,10 @@ prices = prices.sort_index().dropna(how="all")
 names = list(prices.columns)
 n     = len(names)
 print(f"Loaded {len(prices):,} rows | {n} assets: {names}")
-print(f"Price history: {prices.index.min().date()} -> {prices.index.max().date()}")
+print(f"Price history: {prices.index.min().date()} -> {prices.index.max().date()}\n")
 
-# --- Daily simple returns (log alt: np.log(prices).diff()) ---
+# --- Daily simple returns ---
+# (Alternative: log returns via np.log(prices).diff())
 daily_ret = prices.pct_change().dropna(how="all")
 
 # --- RISK: covariance from the most recent COV_YEARS of daily returns (annualized) ---
@@ -42,30 +61,201 @@ ret_window = daily_ret.loc[daily_ret.index >= cov_start].dropna()
 
 cov  = ret_window.cov().values * TRADING_DAYS      # annualized covariance matrix
 vols = np.sqrt(np.diag(cov))                       # annualized volatilities
+
 print(f"Covariance window: {ret_window.index.min().date()} -> "
       f"{ret_window.index.max().date()} ({len(ret_window):,} trading days)")
+if ret_window.index.min().date() > cov_start.date():
+    print(f"  NOTE: fewer than {COV_YEARS}y available; used all {len(ret_window):,} days.")
+print()
 
 # --- EXPECTED RETURN: 12-1 month momentum (skip the most recent month) ---
+# This captures ~11 months of price change, skipping the recent month to avoid short-term reversal.
 mom_end   = last_date - pd.DateOffset(months=1)    # ~1 month ago
 mom_start = last_date - pd.DateOffset(months=12)   # ~12 months ago
+
 if not (prices.index <= mom_start).any():
     raise ValueError("Not enough history to compute 12-1 momentum. Provide more data.")
 
-end_used   = prices.index[prices.index <= mom_end].max()    # nearest trading day on/before
+# Nearest available trading day on or before each target date
+end_used   = prices.index[prices.index <= mom_end].max()
 start_used = prices.index[prices.index <= mom_start].max()
 p_end, p_start = prices.loc[end_used], prices.loc[start_used]
 
 mom_11m = (p_end / p_start) - 1.0                  # 11-month cumulative return
 if ANNUALIZE_MOMENTUM:
-    mu = ((1.0 + mom_11m) ** (12.0 / 11.0) - 1.0).values   # -> annual
+    mu = ((1.0 + mom_11m) ** (12.0 / 11.0) - 1.0).values   # -> annualized
 else:
     mu = mom_11m.values                            # raw 11-month return
-print(f"Momentum window (12-1): {start_used.date()} -> {end_used.date()} (recent month skipped)")
 
-# --- Inputs feeding the optimizer ---
-est = pd.DataFrame({"Exp. return (ann.)": mu, "Volatility (ann.)": vols}, index=names)
-print(est.map(lambda x: f"{x:.2%}").to_string())
+print(f"Momentum window (12-1): {start_used.date()} -> {end_used.date()} "
+      f"(most recent month skipped)\n")
 
-corr = cov / np.outer(vols, vols)                  # implied correlations (sanity check)
-print("\nImplied correlation matrix:")
+# --- Summary of inputs feeding the optimizer ---
+est = pd.DataFrame({"Exp.return(ann)": mu, "Vol(ann)": vols}, index=names)
+disp = est.copy()
+for c in disp.columns:
+    disp[c] = disp[c].map(lambda x: f"{x:.2%}")
+print("Estimated inputs:")
+print(disp.to_string())
+print()
+
+corr = cov / np.outer(vols, vols)
+print("Implied correlation matrix (from covariance):")
 print(pd.DataFrame(corr, index=names, columns=names).round(2).to_string())
+print()
+
+# ============================================================================
+# PORTFOLIO HELPERS AND OPTIMIZER SETUP
+# ============================================================================
+def port_return(w):
+    """Expected return of a portfolio with weights w."""
+    return float(w @ mu)
+
+def port_vol(w):
+    """Volatility (standard deviation) of a portfolio with weights w."""
+    return float(np.sqrt(w @ cov @ w))
+
+lb = -1.0 if allow_shorts else 0.0
+bounds = [(lb, 1.0)] * n
+sum_to_one = {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
+w0 = np.repeat(1.0 / n, n)   # equal-weight starting point
+
+# ============================================================================
+# GLOBAL MINIMUM-VARIANCE (GMV) PORTFOLIO
+# ============================================================================
+gmv = minimize(lambda w: w @ cov @ w, w0, method="SLSQP",
+               bounds=bounds, constraints=[sum_to_one])
+w_gmv   = gmv.x
+vol_gmv = port_vol(w_gmv)
+ret_gmv = port_return(w_gmv)
+print(f"GMV portfolio:   risk = {vol_gmv:.2%},  return = {ret_gmv:.2%}")
+
+# ============================================================================
+# EFFICIENT FRONTIER OVER A GRID OF RISKS
+# ============================================================================
+# For each target risk level, maximize expected return subject to vol <= target.
+# This traces the efficient frontier from the GMV point to the highest-return asset.
+risk_min = vol_gmv
+risk_max = max(float(vols[np.argmax(mu)]), risk_min + 1e-6)
+risk_grid = np.linspace(risk_min, risk_max, 60)
+
+f_vol, f_ret, f_w = [], [], []
+for target in risk_grid:
+    cons = [
+        sum_to_one,
+        {"type": "ineq", "fun": lambda w, t=target: t - port_vol(w)},   # vol <= target
+    ]
+    res = minimize(lambda w: -port_return(w), w0, method="SLSQP",
+                   bounds=bounds, constraints=cons)
+    if res.success:
+        f_vol.append(port_vol(res.x))
+        f_ret.append(port_return(res.x))
+        f_w.append(res.x)
+
+f_vol = np.array(f_vol)
+f_ret = np.array(f_ret)
+f_w   = np.array(f_w)
+print(f"Computed {len(f_vol)} efficient portfolios "
+      f"(risk {f_vol.min():.2%} -> {f_vol.max():.2%}, "
+      f"return {f_ret.min():.2%} -> {f_ret.max():.2%}).")
+print()
+
+# ============================================================================
+# MAXIMUM-SHARPE / TANGENCY PORTFOLIO
+# ============================================================================
+tan = minimize(lambda w: -(port_return(w) - rf) / port_vol(w), w0, method="SLSQP",
+               bounds=bounds, constraints=[sum_to_one])
+w_tan   = tan.x
+vol_tan = port_vol(w_tan)
+ret_tan = port_return(w_tan)
+sharpe  = (ret_tan - rf) / vol_tan
+print(f"Max-Sharpe:      risk = {vol_tan:.2%},  return = {ret_tan:.2%},  Sharpe = {sharpe:.2f}")
+print()
+
+# ============================================================================
+# PLOT 1 — EFFICIENT FRONTIER
+# ============================================================================
+fig, ax = plt.subplots(figsize=(8, 6))
+ax.plot(f_vol, f_ret, lw=2.5, color="#1f3a93", label="Efficient frontier")
+ax.set_xlabel("Risk (volatility, σ)", fontsize=11)
+ax.set_ylabel("Expected return", fontsize=11)
+ax.set_title("Efficient Frontier", fontsize=12, fontweight="bold")
+ax.xaxis.set_major_formatter(PercentFormatter(1.0))
+ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+ax.grid(True, alpha=0.3)
+ax.legend(loc="best")
+plt.tight_layout()
+plt.show()
+
+# ============================================================================
+# PLOT 2 — EFFICIENT FRONTIER WITH INDIVIDUAL ASSETS
+# ============================================================================
+fig, ax = plt.subplots(figsize=(8, 6))
+
+# Frontier
+ax.plot(f_vol, f_ret, lw=2.5, color="#1f3a93", label="Efficient frontier")
+
+# Individual assets
+ax.scatter(vols, mu, s=90, color="#c0392b", zorder=5, label="Individual assets")
+for name, v, m in zip(names, vols, mu):
+    ax.annotate(name, (v, m), textcoords="offset points", xytext=(7, 4), fontsize=9)
+
+# Key points: min-variance (green star) and max-Sharpe (orange star)
+ax.scatter([vol_gmv], [ret_gmv], marker="*", s=260, color="#27ae60",
+           edgecolor="black", linewidth=0.5, zorder=6, label="Min-variance")
+ax.scatter([vol_tan], [ret_tan], marker="*", s=260, color="#e67e22",
+           edgecolor="black", linewidth=0.5, zorder=6, label="Max-Sharpe")
+
+ax.set_xlabel("Risk (volatility, σ)", fontsize=11)
+ax.set_ylabel("Expected return", fontsize=11)
+ax.set_title("Efficient Frontier with Individual Assets", fontsize=12, fontweight="bold")
+ax.xaxis.set_major_formatter(PercentFormatter(1.0))
+ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+ax.grid(True, alpha=0.3)
+ax.legend(loc="best")
+plt.tight_layout()
+plt.show()
+
+# ============================================================================
+# PORTFOLIO WEIGHTS (OPTIONAL)
+# ============================================================================
+print("Portfolio Weights:")
+summary = pd.DataFrame({"Min-variance": w_gmv, "Max-Sharpe": w_tan}, index=names)
+summary.loc["Return"] = [ret_gmv, ret_tan]
+summary.loc["Risk"]   = [vol_gmv, vol_tan]
+print(summary.round(4).map(lambda x: f"{x:.2%}" if isinstance(x, float) else x).to_string())
+
+# ============================================================================
+# NOTES & CAVEATS
+# ============================================================================
+print("\n" + "="*80)
+print("NOTES:")
+print("="*80)
+print("""
+1. Momentum ≠ Forecast
+   12-1 momentum is a heuristic, not a true expected-return forecast.
+   It is noisy and can be negative. Mean-variance optimization amplifies
+   estimation error; consider shrinkage, resampling, or Black–Litterman methods.
+
+2. Horizon Consistency
+   - Covariance is annualized (× 252 trading days)
+   - 11-month momentum is annualized via (1+r)^(12/11) - 1
+   Both axes are on an annual scale. Set ANNUALIZE_MOMENTUM=False for raw 11-month return.
+
+3. Two Different Windows by Design
+   - Covariance: 5 most recent years of daily returns
+   - Expected return: trailing 12-1 months (recent month skipped)
+
+4. Simple vs Log Returns
+   Simple returns are used (consistent with portfolio arithmetic).
+   Log returns (np.log(prices).diff()) are a common alternative;
+   difference is negligible at daily frequency.
+
+5. Long-Only, No Leverage
+   Weights sum to 1; the frontier's top is the single highest-momentum asset.
+   Set allow_shorts=True to allow negative weights (short positions).
+
+6. Solver: SciPy SLSQP
+   Reliable for small portfolios (< 20 assets). For larger problems or
+   ill-conditioned covariance, use a dedicated convex solver (e.g., cvxpy).
+""")
